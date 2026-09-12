@@ -5,14 +5,14 @@
 # @Description: 12580mth(大参林/ddwhcb) - smallcat openid 换业务登录态 + 每日签到
 # cron: 25 14 * * *
 # ------------------------------------------
-# 变量名：12580
+# 变量名：mth12580
 # 变量值：wx_server 里的 openid/账号标识，多账号用 & 或换行分隔（可加 #备注）
 # 示例：owNAX6hm...etI6o&owNAX6j2...LDPc#小号
 #
 # 依赖变量：
-# wx_server_url  默认 https://smallcat.<personal-domain>.cc
-# wx_auth        必填，wx_server 鉴权值（/wx/code 用）
-# 12580_appid    可选，默认 wx1d6ad6c2412dea5a
+# wx_server_url    默认 https://smallcat.<personal-domain>.cc
+# wx_auth          必填，wx_server 鉴权值（/wx/code 用）
+# mth12580_appid   可选，默认 wx1d6ad6c2412dea5a
 # ------------------------------------------
 # 契约（appid wx1d6ad6c2412dea5a，host https://gateway.ddwhcb.com/）：
 # （自反编译主包；channelId=mth，routeFix=12580mth/api/wx，client=4）
@@ -235,14 +235,14 @@ def run_one(sm: Smallcat, openid: str, appid: str) -> str:
 def main() -> int:
     auth = os.getenv("wx_auth", "").strip()
     base = os.getenv("wx_server_url", "https://smallcat.<personal-domain>.cc").strip()
-    openids_raw = os.getenv("12580", "").strip()
-    appid = os.getenv("12580_appid", APPID_DEFAULT).strip()
+    openids_raw = os.getenv("mth12580", "").strip()
+    appid = os.getenv("mth12580_appid", APPID_DEFAULT).strip()
 
     if not auth:
         log.error("缺少 wx_auth")
         return 1
     if not openids_raw:
-        log.error("缺少 12580（openid，多个用 & 分隔）")
+        log.error("缺少 mth12580（openid，多个用 & 分隔）")
         return 1
 
     sm = Smallcat(base, auth)
