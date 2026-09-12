@@ -31,6 +31,8 @@
 #   encryptKey=AKUEMGNTOMSF9H5LP7JKFMSJTXFWDIDF
 #   signtSecret=DLA0NTRXTDNPHEUREZEGIM6YJ8YGJSOC
 #   （仅 gateway.ddwhcb.com / gateway-pre 配置）
+# 登录态缓存 24h；**单次任务内每个 openid 至多调 1 次 /wx/code，失败不重试**。
+# 多账号间隔 sleep，避免触发 smallcat 限流（约 8 code / 90s）。
 # ------------------------------------------
 # */
 
@@ -186,6 +188,32 @@ def split_openids(raw: str) -> List[str]:
     return [p.strip() for p in raw.replace("&", "\n").replace(",", "\n").splitlines() if p.strip()]
 
 
+def cache_path():
+    from pathlib import Path
+
+    p = os.getenv("mth12580_cache", "").strip()
+    if p:
+        return Path(p)
+    return Path(__file__).resolve().parent / "mth12580_token_cache.json"
+
+
+def load_cache() -> Dict[str, Any]:
+    p = cache_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_cache(data: Dict[str, Any]) -> None:
+    try:
+        cache_path().write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def login_with_code(jcode: str) -> Tuple[str, str]:
     """返回 (token, uid)"""
     api = DclApi()
@@ -200,24 +228,34 @@ def login_with_code(jcode: str) -> Tuple[str, str]:
     return token, uid
 
 
-def run_one(sm: Smallcat, openid: str, appid: str) -> str:
+def get_token(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> Tuple[str, str]:
+    """缓存优先；未命中只调一次 /wx/code，不重试。"""
+    key = f"{appid}:{openid}"
+    hit = cache.get(key) or {}
+    ts = hit.get("_ts") or 0
+    if hit.get("token") and time.time() - ts < 24 * 3600:
+        return str(hit["token"]), str(hit.get("uid") or "")
+    jcode = sm.wx_code(openid, appid)
+    token, uid = login_with_code(jcode)
+    cache[key] = {"token": token, "uid": uid, "_ts": time.time()}
+    save_cache(cache)
+    return token, uid
+
+
+def run_one(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> str:
     name = openid[-8:]
     try:
-        jcode = sm.wx_code(openid, appid)
-        token, uid = login_with_code(jcode)
+        token, uid = get_token(sm, openid, appid, cache)
         api = DclApi(token)
 
         page = api.call("memberSignPage")
         signed = False
-        hint = ""
         if page.get("code") == 0:
             pd = page.get("data") or {}
-            # 常见字段：is_sign / sign_status / status
             for k in ("is_sign", "sign_status", "signed", "isSign"):
                 if k in pd:
                     signed = bool(pd.get(k) in (1, True, "1", "已签"))
                     break
-            hint = str(pd.get("msg") or pd.get("tip") or "")
         if signed:
             return f"✅ [{name}] 今日已签到 uid={uid}"
 
@@ -246,12 +284,13 @@ def main() -> int:
         return 1
 
     sm = Smallcat(base, auth)
+    cache = load_cache()
     lines = []
     for oid in split_openids(openids_raw):
-        line = run_one(sm, oid, appid)
+        line = run_one(sm, oid, appid, cache)
         log.info(line)
         lines.append(line)
-        time.sleep(1.2)
+        time.sleep(3)
 
     print("\n" + "=" * 36)
     print("      12580mth 签到简报")

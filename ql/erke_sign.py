@@ -288,20 +288,16 @@ def ensure_login(
     erke: Erke,
     openid: str,
     cache: Dict[str, Any],
-    force: bool = False,
 ) -> Dict[str, Any]:
     key = f"{erke.appid}:{openid}"
     hit = cache.get(key)
-    # 缓存 6 小时有效
-    if hit and not force:
+    # 缓存 24 小时；未命中只调一次 /wx/code，本轮不 force 重试
+    if hit:
         ts = hit.get("_ts") or 0
-        if time.time() - ts < 6 * 3600 and hit.get("memberId") and str(hit.get("memberId")) != "-1":
+        if time.time() - ts < 24 * 3600 and hit.get("memberId") and str(hit.get("memberId")) != "-1":
             return hit
     code = sm.wx_code(openid, erke.appid)
     profile = erke.on_login(code, openid)
-    if not profile.get("memberId") or str(profile.get("memberId")) == "-1":
-        # 有些账号首次 on_login 仅回 openid，再带 openid 重试一次
-        profile = erke.on_login(code, openid)
     profile["_ts"] = time.time()
     cache[key] = profile
     save_cache(cache)
@@ -314,18 +310,10 @@ def run_one(sm: Smallcat, erke: Erke, openid: str, cache: Dict[str, Any]) -> str
         profile = ensure_login(sm, erke, openid, cache)
         mid = profile.get("memberId")
         if not mid or str(mid) == "-1":
-            # 登录态异常，强制刷新一次
-            profile = ensure_login(sm, erke, openid, cache, force=True)
-            mid = profile.get("memberId")
-        if not mid or str(mid) == "-1":
-            return f"❌ [{name}] 登录失败，无 memberId（可能未开卡/风控）"
+            return f"❌ [{name}] 登录失败，无 memberId（下轮再试，避免限流）"
 
         points_before = erke.get_points(profile)
         ok, msg = erke.sign_in(profile)
-        # 签到后若失败，可能是登录态过期，强刷再试一次
-        if not ok:
-            profile = ensure_login(sm, erke, openid, cache, force=True)
-            ok, msg = erke.sign_in(profile)
         points_after = erke.get_points(profile)
         mark = "✅" if ok else "❌"
         return f"{mark} [{name}] {msg} (积分 {points_before} → {points_after})"
@@ -357,7 +345,7 @@ def main() -> int:
         line = run_one(sm, erke, oid, cache)
         log.info(line)
         lines.append(line)
-        time.sleep(1.2)
+        time.sleep(3)
 
     print("\n" + "=" * 36)
     print("      鸿星尔克签到简报")
