@@ -15,22 +15,18 @@ wx_auth        必填，wx_server 鉴权值
 已实现：
 1. 登录 /user/pre/auth（code -> sessionId）
 2. 会员信息 /member/info、签到入口 /activity/signIn/entrance
-3. 签到：运行时从 H5 页发现 activityId（活动按月轮换）
-4. 任务：GET /marketing/task/queryTaskList
-   - 浏览类(SCAN_PAGE/SCAN_GOODS)先访问目标页再领奖
-   - 对 taskStatus=GO_AWARD(2) 调 GET /marketing/task/receiveAward
+3. 签到：从 H5 页 SignIn 楼层发现 activityId
+4. 任务：从 H5 页 Task 楼层 taskActivityInfo 发现任务 activityId
+   GET queryTaskList -> data.taskDTOList（不是 taskList）
+   taskStatus=2 自动 receiveAward
 5. 积分前后对比
 
-契约（heytap/opposhop）：
+契约：
 MINI_API  https://omoapplet-api-cn.heytap.com
 H5_API    https://hd.opposhop.cn
-任务 API  GET {MINI_API}/marketing/task/queryTaskList?activityId=
-          GET {MINI_API}/marketing/task/receiveAward?taskId=&activityId=
-TASK_TYPE 0签到 1浏览页 2分享 3浏览商品 4预约商品 5预约直播
-TASK_STATUS 1待完成 2可领奖 3已完成 6无次数
-签到 H5  POST /api/cn/oapi/marketing/cumulativeSignIn/signIn
-踩坑：签到 activityId 按月换，硬编码会过期；content-type 必须 json；
-      任务领奖是 GET 不是 POST。
+TASK_STATUS 1待完成 2可领奖 3已完成
+踩坑：任务字段 taskDTOList；receiveAward 用 GET；
+      浏览任务需小程序 webview 停留，纯 HTTP 不一定计完成。
 ------------------------------------------
 */
 
@@ -222,7 +218,7 @@ class OppoTask {
         const { status, data: result } = await request({
             method: upperMethod,
             url: `${MINI_API}${path}`,
-            headers: this.miniHeaders(),
+            headers: this.miniHeaders({ Accept: "application/json" }),
             params: upperMethod === "GET" ? data : undefined,
             data: upperMethod === "GET" ? undefined : data,
         });
@@ -321,6 +317,16 @@ class OppoTask {
             if (actionMatch) this.creditsAddActionId = actionMatch[1];
             const name = nameMatch ? nameMatch[1] : "";
             this.log(`签到活动: ${name || "未命名"} (activityId=${this.signActivityId})`);
+            // 任务活动：Task 楼层 taskActivityInfo.activityId（与签到不同）
+            const taskMatch = html.match(
+                /"taskActivityInfo"\s*:\s*\{[^{}]*"activityId"\s*:\s*"(\d+)"[^{}]*"activityName"\s*:\s*"([^"]*)"/
+            );
+            if (taskMatch) {
+                this.taskActivityId = taskMatch[1];
+                this.log(`任务活动: ${taskMatch[2]} (activityId=${this.taskActivityId})`);
+            } else {
+                this.log("任务活动发现: 页面无 taskActivityInfo，回落到签到 activityId");
+            }
         } catch (e) {
             this.log(`签到活动发现失败: ${e.message || e}，回落到内置 id`);
         }
@@ -371,13 +377,14 @@ class OppoTask {
         await this.querySignDetail();
     }
 
-    /** 任务列表：GET /marketing/task/queryTaskList?activityId= */
+    /** 任务列表：GET /marketing/task/queryTaskList?activityId= -> data.taskDTOList */
     async queryTaskList() {
         const activityId = this.taskActivityId || this.signActivityId;
         const result = await this.miniRequest("GET", "/marketing/task/queryTaskList", { activityId });
-        const list = result.data?.taskList || result.data?.list || result.data || [];
+        const data = result.data || {};
+        const list = data.taskDTOList || data.taskList || data.list || [];
         const tasks = Array.isArray(list) ? list : [];
-        this.log(`任务列表: ${tasks.length} 条 (activityId=${activityId})`);
+        this.log(`任务列表: ${tasks.length} 条 (activityId=${activityId} ${data.activityName || ""})`);
         return tasks;
     }
 
@@ -458,55 +465,37 @@ class OppoTask {
             tasks = await this.queryTaskList();
         } catch (e) {
             this.log(`任务列表失败: ${e.message || e}`);
-            // 猜测任务活动 id 可能与签到不同，再试一次不带 activityId
-            try {
-                const result = await this.miniRequest("GET", "/marketing/task/queryTaskList", {});
-                const list = result.data?.taskList || result.data?.list || result.data || [];
-                tasks = Array.isArray(list) ? list : [];
-                this.log(`任务列表(无id重试): ${tasks.length} 条`);
-            } catch (e2) {
-                this.log(`任务列表重试失败: ${e2.message || e2}`);
-                return;
-            }
+            return;
         }
         if (!tasks.length) return;
 
-        for (const task of tasks) {
-            const status = Number(task.taskStatus);
-            const type = Number(task.taskType);
-            this.log(
-                `任务[${task.taskId}] ${task.taskName || taskTypeName(type)} ` +
-                    `status=${status}(${status === 3 ? "已完成" : status === 2 ? "可领奖" : status === 1 ? "待完成" : status}) ` +
-                    `类型=${taskTypeName(type)}`
-            );
+        const now = Date.now();
+        const active = tasks.filter((t) => {
+            const end = Number(t.taskEndTime || 0);
+            const status = Number(t.taskStatus);
+            return status !== TASK_STATUS.FINISHED && status !== TASK_STATUS.NOT_REMAINING_NUMBER && (!end || end > now);
+        });
+        const goAward = active.filter((t) => Number(t.taskStatus) === TASK_STATUS.GO_AWARD);
+        const browse = active.filter(
+            (t) => Number(t.taskStatus) === TASK_STATUS.PREPARE_FINISH && Number(t.taskType) === TASK_TYPE.SCAN_PAGE
+        );
+        this.log(
+            `任务筛选: 有效${active.length} 可领奖${goAward.length} 待浏览${browse.length} (已过滤过期/已完成)`
+        );
+
+        // 1) 浏览类：访问目标页（服务端未必计完成，尽力而为）
+        for (const task of browse.slice(0, 8)) {
+            await this.browseTask(task);
+            await new Promise((r) => setTimeout(r, 2000));
         }
 
-        // 1) 先尝试浏览未完成的浏览类任务
-        for (const task of tasks) {
-            const type = Number(task.taskType);
-            const status = Number(task.taskStatus);
-            if (status === TASK_STATUS.FINISHED || status === TASK_STATUS.NOT_REMAINING_NUMBER) continue;
-            if ([TASK_TYPE.SCAN_PAGE, TASK_TYPE.SCAN_GOODS].includes(type)) {
-                await this.browseTask(task);
-                await new Promise((r) => setTimeout(r, 1500));
-            }
+        // 2) 领取可领奖
+        let got = 0;
+        for (const task of goAward) {
+            if (await this.receiveAward(task)) got += 1;
+            await new Promise((r) => setTimeout(r, 1200));
         }
-
-        // 2) 重新拉列表，对可领奖的领取
-        try {
-            tasks = await this.queryTaskList();
-        } catch (_) {}
-
-        for (const task of tasks) {
-            if (Number(task.taskStatus) === TASK_STATUS.GO_AWARD) {
-                await this.receiveAward(task);
-                await new Promise((r) => setTimeout(r, 1200));
-            }
-        }
-
-        // 3) 汇总
-        const done = tasks.filter((t) => Number(t.taskStatus) === TASK_STATUS.FINISHED).length;
-        this.log(`任务汇总: 已完成 ${done}/${tasks.length}`);
+        this.log(`任务领奖: 成功 ${got}/${goAward.length}`);
     }
 
     async run() {
