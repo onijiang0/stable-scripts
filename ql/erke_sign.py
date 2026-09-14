@@ -10,7 +10,7 @@
 # 示例：owNAX6hm...etI6o&owNAX6j2...LDPc#小号
 #
 # 依赖变量：
-# wx_server_url  默认 https://smallcat.<personal-domain>.cc
+# wx_server_url  必填，wx_server 地址（勿写进仓库）
 # wx_auth        必填，wx_server 鉴权值（/wx/code 用）
 # hxek_appid     可选，默认 wxa1f1fa3785a47c7d（鸿星尔克）
 # hxek_scene     可选，默认 1001
@@ -323,13 +323,16 @@ def run_one(sm: Smallcat, erke: Erke, openid: str, cache: Dict[str, Any]) -> str
 
 def main() -> int:
     auth = os.getenv("wx_auth", "").strip()
-    base = os.getenv("wx_server_url", "https://smallcat.<personal-domain>.cc").strip()
+    base = os.getenv("wx_server_url", "").strip()
     openids_raw = os.getenv("hxek", "").strip()
     appid = os.getenv("hxek_appid", APPID_DEFAULT).strip()
     scene = os.getenv("hxek_scene", "1001").strip()
 
     if not auth:
         log.error("缺少 wx_auth")
+        return 1
+    if not base:
+        log.error("缺少 wx_server_url（wx_server 地址，勿写进仓库）")
         return 1
     if not openids_raw:
         log.error("缺少 hxek（openid，多个用 & 分隔）")

@@ -11,7 +11,7 @@
 #
 # 依赖变量：
 # wx_auth           必填，smallcat 调用 API AUTH
-# wx_server_url     默认 https://smallcat.<personal-domain>.cc
+# wx_server_url     必填，wx_server 地址（勿写进仓库）
 # iqoo_appid        默认 wxcf4266fbc9463132
 # iqoo_browse       默认 4，浏览帖子篇数（多来源拉未读帖）
 # iqoo_like         默认 4，点赞次数
@@ -507,7 +507,7 @@ def run_account(
 def main() -> int:
     raw = os.getenv("iqoo", "").strip()
     auth = os.getenv("wx_auth", "").strip()
-    sc = os.getenv("wx_server_url", "https://smallcat.<personal-domain>.cc").strip()
+    sc = os.getenv("wx_server_url", "").strip()
     appid = os.getenv("iqoo_appid", "wxcf4266fbc9463132").strip()
     browse_n = int(os.getenv("iqoo_browse", "2") or "2")
     like_n = int(os.getenv("iqoo_like", "4") or "4")
@@ -521,6 +521,9 @@ def main() -> int:
         return 1
     if not auth:
         log.error("缺少 wx_auth")
+        return 1
+    if not sc:
+        log.error("缺少 wx_server_url（wx_server 地址，勿写进仓库）")
         return 1
 
     openids = parse_openids(raw)
