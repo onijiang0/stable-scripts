@@ -13,11 +13,11 @@
 # wx_auth           必填，smallcat 调用 API AUTH
 # wx_server_url     默认 https://smallcat.<personal-domain>.cc
 # iqoo_appid        默认 wxcf4266fbc9463132
-# iqoo_browse       默认 2，浏览帖子篇数
+# iqoo_browse       默认 4，浏览帖子篇数（多来源拉未读帖）
 # iqoo_like         默认 4，点赞次数
 # iqoo_share        默认 4，分享次数
 # iqoo_comment      默认 1，评论次数（内容来自一言，去掉来源后缀）
-# iqoo_draw         默认 1=只抽每日免费第一抽；0=不抽（不消耗任务额外次数）
+# iqoo_draw         默认 1=只抽每日免费第一抽（当天已中奖则跳过）；0=不抽
 # iqoo_post         默认 1，发帖次数（发到「聊游戏」categoryId=21）
 # ------------------------------------------
 # 契约（bbs-api.iqoo.com + smallcat）：
@@ -213,26 +213,73 @@ class IqooApi:
             "dailyScore": data.get("dailyScore"),
         }
 
+    def browse_pool(self, n: int) -> List[dict]:
+        """优先分类页帖子（更可能是本日未读），避免总刷同一批推荐帖。"""
+        seen: set = set()
+        out: List[dict] = []
+
+        def add(lst):
+            for t in lst or []:
+                if not isinstance(t, dict):
+                    continue
+                tid = t.get("id") or t.get("threadId")
+                if not tid or tid in seen:
+                    continue
+                seen.add(tid)
+                if "id" not in t and t.get("threadId"):
+                    t = dict(t)
+                    t["id"] = t["threadId"]
+                out.append(t)
+
+        for cid in (21, 26, 27, 28, 45, 16, 9, 10):
+            for page in (1, 2, 3):
+                d = self.call("GET", f"v4/categories/{cid}/threads", params={"page": page, "perPage": 10})
+                add((d.get("Data") or {}).get("data") or (d.get("Data") or {}).get("pageData"))
+                if len(out) >= max(n, 6):
+                    return out[: max(n, 6)]
+        d = self.call("GET", "v5/recommend/thread/list", params={"page": 2, "perPage": 10})
+        add((d.get("Data") or {}).get("data"))
+        return out[: max(n, 6)]
+
     def list_threads(self, n: int) -> List[dict]:
-        d = self.call("GET", "v5/recommend/thread/list", params={"page": 1, "perPage": max(n, 8)})
-        lst = (d.get("Data") or {}).get("data") or []
-        if not isinstance(lst, list) or not lst:
-            d = self.call("GET", "v3/thread.list", params={"page": 1, "perPage": max(n, 8)})
-            lst = (d.get("Data") or {}).get("pageData") or []
-        return [t for t in lst if (t.get("id") or t.get("threadId"))][: max(n, 8)]
+        """点赞/分享/评论用：推荐帖优先。"""
+        seen: set = set()
+        out: List[dict] = []
+
+        def add(lst):
+            for t in lst or []:
+                if not isinstance(t, dict):
+                    continue
+                tid = t.get("id") or t.get("threadId")
+                if not tid or tid in seen:
+                    continue
+                seen.add(tid)
+                if "id" not in t and t.get("threadId"):
+                    t = dict(t)
+                    t["id"] = t["threadId"]
+                out.append(t)
+
+        d = self.call("GET", "v5/recommend/thread/list", params={"page": 1, "perPage": 20})
+        add((d.get("Data") or {}).get("data"))
+        d = self.call("GET", "v3/thread.list", params={"page": 1, "perPage": 10})
+        add((d.get("Data") or {}).get("pageData"))
+        return out[: max(n, 8)]
 
     def browse(self, threads: List[dict], n: int) -> List[str]:
+        """尽量用未读帖；服务端 viewCount 可能不立刻涨，日志如实报。"""
         lines = []
         ok_n = 0
-        for t in threads[:n]:
+        want = max(n, 4)
+        for t in threads[:want]:
             tid = t.get("id") or t.get("threadId")
             r = self.call("GET", "v3/thread.detail", params={"threadId": tid})
             ok = r.get("Code") == 0
             lines.append(f"浏览#{tid} {'OK' if ok else r.get('Message')}")
             if ok:
                 ok_n += 1
-            time.sleep(0.8)
-        lines.append(f"浏览完成{ok_n}篇")
+            time.sleep(2)
+        p = self.progress()
+        lines.append(f"浏览完成{ok_n}篇 任务进度 view={p['view']}")
         return lines
 
     def like(self, threads: List[dict], n: int) -> List[str]:
@@ -325,10 +372,20 @@ class IqooApi:
         return lines
 
     def draw(self, max_times: int) -> List[str]:
-        """只抽每日免费第一抽，不消耗任务额外次数。"""
+        """只抽每日免费第一抽；当天已有中奖记录则跳过，防同日重复跑。"""
         lines = []
         if max_times <= 0:
             return ["抽奖跳过"]
+        from datetime import datetime, timedelta, timezone
+
+        today = datetime.now(timezone(timedelta(hours=8))).strftime("%m-%d")
+        d = self.call("GET", "v3/user.winning.list", params={"page": 1})
+        wins = (d.get("Data") or {}).get("list") or []
+        for w in wins:
+            created = str(w.get("created_at") or "")
+            if created.startswith(today):
+                lines.append(f"今日已抽过（{created} {w.get('prize_name')}），跳过")
+                return lines
         d = self.call("GET", "v3/today.draw.count")
         cnt = int((d.get("Data") or {}).get("count") or 0)
         lines.append(f"抽奖池剩余={cnt}（只抽免费1次）")
@@ -379,10 +436,11 @@ def run_account(
 
     need = max(browse_n, like_n, share_n, comment_n, 2)
     threads = api.list_threads(need)
-    lines.append(f"候选帖{len(threads)}篇")
+    browse_src = api.browse_pool(max(browse_n, 4))
+    lines.append(f"候选帖{len(threads)}篇 浏览池{len(browse_src)}篇")
 
     try:
-        lines.extend(api.browse(threads, browse_n))
+        lines.extend(api.browse(browse_src, browse_n))
     except Exception as e:
         lines.append(f"浏览异常 {e}")
     try:
