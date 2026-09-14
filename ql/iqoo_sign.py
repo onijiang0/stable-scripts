@@ -17,7 +17,7 @@
 # iqoo_like         默认 4，点赞次数
 # iqoo_share        默认 4，分享次数
 # iqoo_comment      默认 1，评论次数（内容来自一言，去掉来源后缀）
-# iqoo_draw         默认 1，抽奖次数
+# iqoo_draw         默认 1=只抽每日免费第一抽；0=不抽（不消耗任务额外次数）
 # iqoo_post         默认 1，发帖次数（发到「聊游戏」categoryId=21）
 # ------------------------------------------
 # 契约（bbs-api.iqoo.com + smallcat）：
@@ -325,22 +325,19 @@ class IqooApi:
         return lines
 
     def draw(self, max_times: int) -> List[str]:
+        """只抽每日免费第一抽，不消耗任务额外次数。"""
         lines = []
         if max_times <= 0:
-            return ["抽奖次数0，跳过"]
+            return ["抽奖跳过"]
         d = self.call("GET", "v3/today.draw.count")
         cnt = int((d.get("Data") or {}).get("count") or 0)
-        lines.append(f"剩余抽奖次数={cnt}")
-        times = min(max_times, cnt) if cnt > 0 else min(max_times, 1)
-        for i in range(times):
-            r = self.call("POST", "v3/luck.draw", body={})
-            if r.get("Code") == 0:
-                data = r.get("Data") or {}
-                lines.append(f"抽奖{i + 1}: {data.get('prize_name') or data.get('prize_id')}")
-            else:
-                lines.append(f"抽奖{i + 1}失败: {r.get('Code')} {r.get('Message')}")
-                break
-            time.sleep(1)
+        lines.append(f"抽奖池剩余={cnt}（只抽免费1次）")
+        r = self.call("POST", "v3/luck.draw", body={})
+        if r.get("Code") == 0:
+            data = r.get("Data") or {}
+            lines.append(f"免费抽奖: {data.get('prize_name') or data.get('prize_id')}")
+        else:
+            lines.append(f"免费抽奖失败: {r.get('Code')} {r.get('Message')}")
         return lines
 
 
