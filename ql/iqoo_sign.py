@@ -19,24 +19,50 @@
 # iqoo_comment      默认 1，评论次数（内容来自一言，去掉来源后缀）
 # iqoo_draw         默认 1=只抽每日免费第一抽（当天已中奖则跳过）；0=不抽
 # iqoo_post         默认 1，发帖次数（发到「聊游戏」categoryId=21）
-# ------------------------------------------
+#
+# ========== 已实现 ==========
+# 1. 登录：smallcat getphonenumber + code -> v3/users/vivo/mini 拿 accessToken
+# 2. 签到：POST v3/sign（已签则识别「已经签到」）
+# 3. 点赞：POST v3/posts.update，跳过 isLiked=true 的帖
+# 4. 分享：POST v3/thread.share
+# 5. 评论：POST v3/posts.create，内容一言 hitokoto（只取正文，去掉「——出处」）
+# 6. 发帖：POST v3/thread.create 到「聊游戏」categoryId=21
+# 7. 抽奖：只抽每日免费第一抽；查 v3/user.winning.list 当天已有 created_at 则跳过
+# 8. 积分：起止各取一次，日志打印「酷币 a -> b（+delta）」
+# 9. 多账号：openid 换行分隔，账号间 sleep 3s
+#
+# ========== 踩坑 / 限制 ==========
+# 1. 签名：SIGN 头 = IQOO-HMAC-SHA256 + appid=1002,timestamp=,signature=
+#    raw = METHOD&/api/path&sortedQs&jsonBody&appid=1002&ts
+#    HMAC-SHA256(appKey=2618194b0ebb620055e19cf9811d3c13) 必须 base64，不是 hex
+#    GET 用排序 encodeURIComponent 查询串；POST 用 JSON.stringify(body)
+# 2. 必带头：X-Visitor(任意uuid/murmur)、X-Platform=mini、Authorization Bearer
+#    头名是 SIGN 不是 X-Sign；path 必须带 /api/ 前缀
+# 3. 发帖 content 必须是 dict {text,indexes:[]}，纯字符串会 -5003 请输入帖子内容
+#    「聊游戏」是分类不是话题：categoryId=21（父级19游戏圈）
+#    无发帖权限会 -4002；发太快 -10002
+# 4. 阅读任务 viewCount：thread.detail 能读到帖，但服务端基本不把 API 请求
+#    计入「浏览帖子」（反自动化）。号2 偶发 1/2 多半来自真机。无独立 view 上报接口。
+# 5. 抽奖：同日重复调 luck.draw 仍会成功并消耗任务次数 -> 必须用中奖记录防重
+#    today.draw.count 是任务送的次数，免费第一抽不依赖它（count=0 也能抽）
+# 6. smallcat：/wx/code 约 8次/90s；getphonenumber 会占用该 openid 会话
+#    不是每个 openid 都能取手机号（有的返回 js-login code empty）
+# 7. thread.list 的 pageData 字段是 threadId；推荐列表字段是 id
+#    v4/categories/{id}/threads 的 Data.data[] 用 id
+# 8. 同日重跑：已签/已赞/已抽/已发帖(限1) 会跳过，属预期；点赞上限4、分享上限4
+#
 # 契约（bbs-api.iqoo.com + smallcat）：
 # 登录  getphonenumber + code -> v3/users/vivo/mini -> accessToken
 # 签到  POST v3/sign
-# 浏览  GET  v5/recommend/thread/list + GET v3/thread.detail
+# 浏览  GET  v4/categories/{id}/threads + GET v3/thread.detail
 # 点赞  POST v3/posts.update {id:threadId,postId,data:{attributes:{isLiked:true}}}
 # 分享  POST v3/thread.share {threadId}
 # 评论  POST v3/posts.create {id:threadId,type:0,content,source}
-# 发帖  POST v3/thread.create
-#       body {title,content:{text,indexes:[]},categoryId:21}
-#       categoryId=21 为「聊游戏」(父级19游戏圈)；content 必须是 dict
-#       纯字符串 content 会 -5003 请输入帖子内容
-# 抽奖  GET  v3/today.draw.count / POST v3/luck.draw
+# 发帖  POST v3/thread.create {title,content:{text,indexes:[]},categoryId:21}
+# 抽奖  GET  v3/user.winning.list 防重；POST v3/luck.draw
 # 进度  GET  v5/users/tasks/today-progress
 # 积分  GET  v3/user?userId= -> Data.score
-# 一言  GET  https://v1.hitokoto.cn/?encode=json -> hitokoto（不用 from 后缀）
-# 签名  SIGN: IQOO-HMAC-SHA256 appid=1002,timestamp=..,signature=..
-#       HMAC-SHA256(appKey=2618194b0ebb620055e19cf9811d3c13) base64
+# 一言  GET  https://v1.hitokoto.cn/?encode=json -> hitokoto
 # 响应  {Code,Message,Data}；Code==0 成功
 # ------------------------------------------
 # */
