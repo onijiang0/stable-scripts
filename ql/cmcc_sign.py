@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
-# @Description: 中国移动10086签到 - smallcat OAuth 换 QWHD_SESSION_TOKEN + 每日签到
+# @Description: 中国移动10086签到 - smallcat /wx/code 换 QWHD_SESSION_TOKEN + 每日签到
 # cron: 30 8 * * *
 # ------------------------------------------
 # 变量名：cmcc
@@ -16,12 +16,10 @@
 # cmcc_touch_id  可选，默认 26-05-10005-2007-A01
 # ------------------------------------------
 # 契约：
-# 两段式 OAuth（复刻傻妞 container.SmallCat.oauth）：
-#   ① POST {smallcat}/api/oauth -> data.full_url
-#   ② GET full_url 跟随重定向，遇微信 authorize 停下，提取 bindAccount 回跳
-#   ③ POST {smallcat}/api/oauth (redirect_uri=bindAccount回跳) -> full_url
-#   ④ GET full_url 跟随重定向 -> Set-Cookie: QWHD_SESSION_TOKEN
-# 签到 POST /qwhdhub/api/mark/do/mark  Cookie: QWHD_SESSION_TOKEN=...
+# smallcat  POST /wx/code  json:{openid, appid} -> data.code
+# OAuth     GET https://wx.10086.cn/qwhdhub/qwhdmark/{id}?code={code}&yx=..&touch_id=..
+#           跟随重定向累加 Cookie -> Set-Cookie: QWHD_SESSION_TOKEN
+# 签到      POST /qwhdhub/api/mark/do/mark  Cookie: QWHD_SESSION_TOKEN=...
 # 已签到关键词: 已签|重复|already|TODAY_MARKED
 # 缓存 6h；失败自动重登；多账号 sleep 3s
 # ------------------------------------------
@@ -37,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
@@ -59,7 +57,6 @@ UA = (
     "NetType/WIFI Language/zh_CN ABI/arm64 miniProgram/wx43aab19a93a3a6f2"
 )
 ALREADY_RE = re.compile(r"已签|已经签|签到过|重复|already|TODAY_MARKED", re.I)
-AUTHORIZE_MARKER = "open.weixin.qq.com/connect/oauth2/authorize"
 
 
 class Smallcat:
@@ -74,22 +71,21 @@ class Smallcat:
         r.raise_for_status()
         return (r.json().get("data") or {}).get("items") or []
 
-    def oauth(self, appid: str, openid: str, redirect_uri: str,
-              scope: str = "snsapi_base", state: str = "") -> str:
+    def wx_code(self, openid: str, appid: str) -> str:
+        """POST /wx/code 获取微信 code（限流 ~8次/90秒）"""
         r = self.s.post(
-            f"{self.base}/api/oauth",
-            json={"appid": appid, "openid": openid, "scope": scope,
-                  "redirect_uri": redirect_uri, "state": state},
+            f"{self.base}/wx/code",
+            json={"openid": openid, "appid": appid},
             timeout=self.timeout,
         )
         r.raise_for_status()
         data = r.json()
         if not data.get("status"):
-            raise RuntimeError(f"smallcat oauth 失败: {data.get('message')}")
-        full_url = (data.get("data") or {}).get("full_url") or ""
-        if not full_url:
-            raise RuntimeError(f"smallcat oauth 未返回 full_url: {str(data)[:200]}")
-        return full_url
+            raise RuntimeError(f"smallcat /wx/code 失败: {data.get('message')}")
+        code = (data.get("data") or {}).get("code") or ""
+        if not code:
+            raise RuntimeError("smallcat 未返回 code（可能限流）")
+        return code
 
 
 def parse_cookie_str(s: str) -> Dict[str, str]:
@@ -107,13 +103,11 @@ def parse_cookie_str(s: str) -> Dict[str, str]:
 def follow_redirects(
     start_url: str,
     base_cookie: str = "",
-    stop_at_authorize: bool = False,
     max_hops: int = 20,
     timeout: int = 15,
-) -> Tuple[Dict[str, str], Optional[str], int]:
+) -> Tuple[Dict[str, str], int]:
     cookie_map = parse_cookie_str(base_cookie)
     current = start_url
-    authorize_url = None
     http_status = 0
 
     for _ in range(max_hops + 1):
@@ -121,22 +115,22 @@ def follow_redirects(
         host = urlparse(current).netloc
         resp = requests.get(
             current,
-            headers={"Host": host, "User-Agent": UA, "Cookie": cookie_header,
-                     "Accept": "text/html,*/*;q=0.8", "Accept-Language": "zh-CN,zh;q=0.9"},
+            headers={
+                "Host": host, "User-Agent": UA, "Cookie": cookie_header,
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            },
             allow_redirects=False, timeout=timeout,
         )
         http_status = resp.status_code
         for k, v in resp.cookies.get_dict().items():
             cookie_map[k] = v
         loc = resp.headers.get("Location", "")
-        if stop_at_authorize and loc and AUTHORIZE_MARKER in loc:
-            authorize_url = loc
-            break
         if 300 <= resp.status_code < 400 and loc:
             current = urljoin(current, loc)
             continue
         break
-    return cookie_map, authorize_url, http_status
+    return cookie_map, http_status
 
 
 class CMCC:
@@ -144,11 +138,8 @@ class CMCC:
         self.yx = yx
         self.touch_id = touch_id
 
-    def activity_url(self) -> str:
-        return f"{BASE}/qwhdhub/qwhdmark/{ACTIVITY_ID}?ys=&yx={self.yx}&touch_id={self.touch_id}"
-
     def _referer(self) -> str:
-        return self.activity_url() + "#/"
+        return f"{BASE}/qwhdhub/qwhdmark/{ACTIVITY_ID}?ys=&yx={self.yx}&touch_id={self.touch_id}#/"
 
     def _cookie(self, cm: Dict[str, str]) -> str:
         parts = [f"yx={self.yx}", f"touch_id={self.touch_id}"]
@@ -158,10 +149,13 @@ class CMCC:
     def _post(self, url: str, cm: Dict[str, str]) -> Dict[str, Any]:
         resp = requests.post(
             url,
-            headers={"Host": "wx.10086.cn", "Content-Type": "application/json;charset=UTF-8",
-                     "Accept": "*/*", "Origin": BASE, "Referer": self._referer(),
-                     "x-requested-with": "XMLHttpRequest", "login-check": "1",
-                     "User-Agent": UA, "Cookie": self._cookie(cm)},
+            headers={
+                "Host": "wx.10086.cn",
+                "Content-Type": "application/json;charset=UTF-8",
+                "Accept": "*/*", "Origin": BASE, "Referer": self._referer(),
+                "x-requested-with": "XMLHttpRequest", "login-check": "1",
+                "User-Agent": UA, "Cookie": self._cookie(cm),
+            },
             json={}, timeout=15,
         )
         try:
@@ -194,28 +188,40 @@ def interpret_sign(raw: Dict[str, Any]) -> Tuple[bool, str]:
 
 def acquire_cookie(sm: Smallcat, cmcc: CMCC, appid: str, openid: str,
                    timeout: int = 30) -> Dict[str, str]:
-    """两段式 OAuth：活动页 -> 捕获 authorize -> bindAccount 回跳 -> 拿 session"""
-    activity = cmcc.activity_url()
+    """
+    用 smallcat /wx/code 拿 code，拼到活动页 URL，跟随重定向拿 Cookie。
+    10086 活动页收到 code 后由服务端完成 SSO 并签发 QWHD_SESSION_TOKEN。
+    """
+    code = sm.wx_code(openid, appid)
+    log.info("wx/code 获取成功: %s...", code[:12])
 
-    # 第一段
-    full1 = sm.oauth(appid, openid, activity)
-    cm1, auth_url, _ = follow_redirects(full1, stop_at_authorize=True, timeout=timeout)
-    if not auth_url:
-        raise RuntimeError("未捕获到微信授权地址（smallcat 账号状态可能异常）")
+    # 拼活动页 URL，带上 code
+    activity = (
+        f"{BASE}/qwhdhub/qwhdmark/{ACTIVITY_ID}"
+        f"?code={quote(code)}"
+        f"&ys=&yx={cmcc.yx}&touch_id={cmcc.touch_id}"
+    )
 
-    qs = parse_qs(urlparse(auth_url).query)
-    bind_redirect = (qs.get("redirect_uri") or [""])[0]
-    if not bind_redirect:
-        raise RuntimeError("未能从微信授权地址解析出 bindAccount 回跳地址")
+    cm, status = follow_redirects(activity, timeout=timeout)
 
-    # 第二段
-    full2 = sm.oauth(appid, openid, bind_redirect)
-    base_ck = "; ".join(f"{k}={v}" for k, v in cm1.items())
-    cm2, _, status = follow_redirects(full2, base_cookie=base_ck, timeout=timeout)
+    if "QWHD_SESSION_TOKEN" not in cm:
+        # 可能需要走 authorize 跳转，再试一次带 state
+        oauth_url = (
+            f"https://open.weixin.qq.com/connect/oauth2/authorize"
+            f"?appid={appid}"
+            f"&redirect_uri={quote(activity, safe='')}"
+            f"&response_type=code&scope=snsapi_base&state=STATE#wechat_redirect"
+        )
+        cm2, status2 = follow_redirects(oauth_url, timeout=timeout)
+        cm.update(cm2)
+        status = status2
 
-    if "QWHD_SESSION_TOKEN" not in cm2:
-        raise RuntimeError(f"未获取到 QWHD_SESSION_TOKEN (HTTP {status})，两段式 OAuth 失败")
-    return cm2
+    if "QWHD_SESSION_TOKEN" not in cm:
+        raise RuntimeError(
+            f"未获取到 QWHD_SESSION_TOKEN (HTTP {status})。"
+            f"请确认 smallcat 账号已授权该公众号 (appid={appid})"
+        )
+    return cm
 
 
 # ========== 缓存 ==========
@@ -265,8 +271,11 @@ def run_one(sm: Smallcat, cmcc: CMCC, appid: str, openid: str,
     if not cm or "QWHD_SESSION_TOKEN" not in cm:
         log.info("获取 Cookie (openid=%s)...", mask(openid))
         cm = acquire_cookie(sm, cmcc, appid, openid)
-        cache[key] = {"openid": openid, "cookie": "; ".join(f"{k}={v}" for k, v in cm.items()),
-                       "_ts": time.time()}
+        cache[key] = {
+            "openid": openid,
+            "cookie": "; ".join(f"{k}={v}" for k, v in cm.items()),
+            "_ts": time.time(),
+        }
         save_cache(cache)
         log.info("Cookie 获取成功")
 
