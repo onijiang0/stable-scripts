@@ -40,8 +40,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG if os.getenv("CMCC_DEBUG") else logging.INFO,
+                    format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("CMCC")
 
 APPID_DEFAULT = "wx43a850f87498127d"
@@ -66,6 +69,7 @@ class Smallcat:
         self.base = base.rstrip("/")
         self.timeout = timeout
         self.s = requests.Session()
+        self.s.verify = False  # smallcat 自签证书
         self.s.headers.update({"auth": auth, "User-Agent": UA})
 
     def accounts(self) -> List[Dict[str, Any]]:
@@ -94,6 +98,7 @@ class Smallcat:
         """
         公众号 OAuth：POST /wx/oauth -> data.full_url
         对应傻妞 container.SmallCat.oauth()，用于需要 wmhToken 的 H5 活动页。
+        注意：status=false 时 full_url 仍可能有效（预验证 redirect_uri 失败不影响实际 OAuth）。
         """
         r = self.s.post(
             f"{self.base}/wx/oauth",
@@ -103,11 +108,13 @@ class Smallcat:
         )
         r.raise_for_status()
         data = r.json()
-        if not data.get("status"):
-            raise RuntimeError(f"smallcat /wx/oauth 失败: {data.get('message')}")
         full_url = (data.get("data") or {}).get("full_url") or ""
         if not full_url:
-            raise RuntimeError(f"smallcat /wx/oauth 未返回 full_url: {str(data)[:200]}")
+            err = (data.get("data") or {}).get("error", "")
+            raise RuntimeError(f"smallcat /wx/oauth 未返回 full_url: {data.get('message')} {err}")
+        if not data.get("status"):
+            log.debug(f"oauth status=false 但有 full_url: {data.get('message')}")
+        return full_url
         return full_url
 
 
@@ -135,7 +142,7 @@ def follow_redirects(
     http_status = 0
     authorize_marker = "open.weixin.qq.com/connect/oauth2/authorize"
 
-    for _ in range(max_hops + 1):
+    for hop in range(max_hops + 1):
         cookie_header = "; ".join(f"{k}={v}" for k, v in cookie_map.items())
         host = urlparse(current).netloc
         resp = requests.get(
@@ -145,12 +152,55 @@ def follow_redirects(
                 "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
                 "Accept-Language": "zh-CN,zh;q=0.9",
             },
-            allow_redirects=False, timeout=timeout,
+            allow_redirects=False, timeout=timeout, verify=False,
         )
         http_status = resp.status_code
-        for k, v in resp.cookies.get_dict().items():
+        new_cookies = resp.cookies.get_dict()
+        for k, v in new_cookies.items():
             cookie_map[k] = v
         loc = resp.headers.get("Location", "")
+        log.debug(f"  hop{hop}: {resp.status_code} {current[:100]} -> loc={loc[:100] if loc else '-'} cookies={list(new_cookies.keys())}")
+        if resp.status_code == 200 and not loc:
+            body = resp.text or ""
+            log.debug(f"  body({len(body)} bytes): {body[:3000]}")
+            # 尝试从页面提取 redirect URL 或表单 action
+            import re as _re
+            # 方法1: JS redirect
+            m = _re.search(r'(?:window\.location(?:\.href)?|location\.href)\s*=\s*["\']([^"\']+)["\']', body)
+            if m:
+                log.info(f"  从页面提取到 redirect: {m.group(1)[:100]}")
+                current = urljoin(current, m.group(1))
+                continue
+            # 方法2: 表单提交（微信授权确认页）
+            m2 = _re.search(r'<form[^>]*action=["\']([^"\']+)["\']', body)
+            if m2:
+                action = m2.group(1)
+                log.info(f"  发现表单 action: {action[:100]}")
+                # 提取表单字段
+                inputs = _re.findall(r'<input[^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)["\']', body)
+                if not inputs:
+                    inputs = _re.findall(r'<input[^>]*value=["\']([^"\']*)["\'][^>]*name=["\']([^"\']+)["\']', body)
+                    inputs = [(v, n) for n, v in inputs]
+                form_data = dict(inputs)
+                log.debug(f"  表单字段: {list(form_data.keys())}")
+                # POST 表单
+                resp2 = requests.post(
+                    urljoin(current, action),
+                    data=form_data,
+                    headers={"User-Agent": UA, "Referer": current,
+                             "Content-Type": "application/x-www-form-urlencoded"},
+                    allow_redirects=False, timeout=timeout, verify=False,
+                )
+                for k, v in resp2.cookies.get_dict().items():
+                    cookie_map[k] = v
+                loc2 = resp2.headers.get("Location", "")
+                log.info(f"  表单提交: {resp2.status_code} -> loc={loc2[:100] if loc2 else '-'}")
+                if 300 <= resp2.status_code < 400 and loc2:
+                    current = urljoin(current, loc2)
+                    continue
+                # 如果返回 200，可能是成功页面，检查 cookies
+                if "QWHD_SESSION_TOKEN" in cookie_map or "code=" in current:
+                    break
         if stop_at_authorize and loc and authorize_marker in loc:
             cookie_map["_authorize_url"] = loc
             break
@@ -158,6 +208,7 @@ def follow_redirects(
             current = urljoin(current, loc)
             continue
         break
+    log.info(f"  跳转结束: HTTP {http_status}, cookies={list(cookie_map.keys())}")
     return cookie_map, http_status
 
 
@@ -184,7 +235,7 @@ class CMCC:
                 "x-requested-with": "XMLHttpRequest", "login-check": "1",
                 "User-Agent": UA, "Cookie": self._cookie(cm),
             },
-            json={}, timeout=15,
+            json={}, timeout=15, verify=False,
         )
         try:
             return resp.json() or {}
@@ -217,37 +268,35 @@ def interpret_sign(raw: Dict[str, Any]) -> Tuple[bool, str]:
 def acquire_cookie(sm: Smallcat, cmcc: CMCC, appid: str, openid: str,
                    timeout: int = 30) -> Dict[str, str]:
     """
-    两段式公众号 OAuth（复刻傻妞 container.SmallCat.oauth）：
-    ① /wx/oauth(活动页) -> full_url -> 跟随到微信 authorize，提取 bindAccount 回跳
-    ② /wx/oauth(bindAccount回跳) -> full_url -> 跟随重定向 -> QWHD_SESSION_TOKEN
+    公众号 OAuth -> 跟随 SSO 跳转链 -> 拿 QWHD_SESSION_TOKEN
     """
     activity = f"{BASE}/qwhdhub/qwhdmark/{ACTIVITY_ID}?ys=&yx={cmcc.yx}&touch_id={cmcc.touch_id}"
 
-    # 第一段：活动页 -> 捕获微信 authorize 地址
+    # 1. smallcat OAuth 拿业务回调 URL（带 code）
     full1 = sm.oauth(appid, openid, activity)
-    log.info("oauth(1) full_url 获取成功")
-    cm1, status1 = follow_redirects(full1, stop_at_authorize=True, timeout=timeout)
-    authorize_url = cm1.pop("_authorize_url", "")
-    if not authorize_url:
-        raise RuntimeError(f"未捕获到微信授权地址 (HTTP {status1})，smallcat 账号状态可能异常")
+    log.info(f"oauth full_url: {full1}")
 
-    qs = parse_qs(urlparse(authorize_url).query)
-    bind_redirect = (qs.get("redirect_uri") or [""])[0]
-    if not bind_redirect:
-        raise RuntimeError("未能从微信授权地址解析出 bindAccount 回跳地址")
+    # 2. 跟随 full_url，不阻止 authorize，看完整跳转链
+    cm, status = follow_redirects(full1, max_hops=20, timeout=timeout)
+    log.info(f"跟随后 cookies: {list(cm.keys())}, HTTP {status}")
 
-    # 第二段：带当日 sid 的 bindAccount 回跳 -> 完成 SSO
-    full2 = sm.oauth(appid, openid, bind_redirect)
-    log.info("oauth(2) full_url 获取成功")
-    base_ck = "; ".join(f"{k}={v}" for k, v in cm1.items())
-    cm2, status2 = follow_redirects(full2, base_cookie=base_ck, timeout=timeout)
+    if "QWHD_SESSION_TOKEN" in cm:
+        return cm
 
-    if "QWHD_SESSION_TOKEN" not in cm2:
+    # 3. 如果有 d.sid，试试从 qwhdsso/redirect 拿 session
+    if "d.sid" in cm:
+        sid_url = f"{BASE}/qwhdsso/redirect?sid={cm['d.sid']}"
+        log.info(f"尝试 qwhdsso/redirect: {sid_url[:80]}...")
+        cm2, status2 = follow_redirects(sid_url, timeout=timeout)
+        cm.update(cm2)
+        log.info(f"qwhdsso 后 cookies: {list(cm.keys())}")
+
+    if "QWHD_SESSION_TOKEN" not in cm:
         raise RuntimeError(
-            f"未获取到 QWHD_SESSION_TOKEN (HTTP {status2})。"
+            f"未获取到 QWHD_SESSION_TOKEN。cookies: {list(cm.keys())}。"
             f"请确认 smallcat 账号已授权该公众号 (appid={appid})"
         )
-    return cm2
+    return cm
 
 
 # ========== 缓存 ==========
@@ -328,12 +377,43 @@ def main() -> int:
     auth = os.getenv("wx_auth", "").strip()
     base = os.getenv("wx_server_url", "").strip()
     openids_raw = os.getenv("cmcc", "").strip()
+    manual_cookie = os.getenv("cmcc_cookie", "").strip()
     appid = os.getenv("cmcc_appid", APPID_DEFAULT).strip()
     yx = os.getenv("cmcc_yx", "JHT042591F0005").strip()
     touch_id = os.getenv("cmcc_touch_id", "26-05-10005-2007-A01").strip()
 
+    cmcc = CMCC(yx, touch_id)
+    cache = load_cache()
+
+    # 手动 Cookie 模式：跳过 OAuth，直接用提供的 Cookie 签到
+    if manual_cookie:
+        log.info("=" * 40)
+        log.info("中国移动10086签到 (手动 Cookie 模式)")
+        log.info("=" * 40)
+        cm = parse_cookie_str(manual_cookie)
+        if "QWHD_SESSION_TOKEN" not in cm:
+            log.error("cmcc_cookie 缺少 QWHD_SESSION_TOKEN")
+            return 1
+        try:
+            before = cmcc.prize_info(cm)
+            bd = before.get("data") or {}
+            log.info("状态: 已签 %s/%s | 今日已签: %s",
+                     bd.get("markedTimes", "?"), bd.get("totalMarkTimes", "?"), bd.get("todayMarked"))
+        except Exception:
+            pass
+        log.info(">>> 执行签到 <<<")
+        raw = cmcc.do_mark(cm)
+        ok, msg = interpret_sign(raw)
+        label = ("✅" if ok else "❌") + f" {msg}"
+        log.info(label)
+        print("\n" + "=" * 40)
+        print(f"  {label}")
+        print("=" * 40)
+        return 0 if ok else 1
+
+    # OAuth 模式需要 smallcat
     if not base:
-        log.error("缺少 wx_server_url")
+        log.error("缺少 wx_server_url（OAuth 模式）或 cmcc_cookie（手动模式）")
         return 1
     if not auth:
         log.error("缺少 wx_auth")
@@ -355,9 +435,6 @@ def main() -> int:
     if not openids:
         log.error("无可用 openid")
         return 1
-
-    cmcc = CMCC(yx, touch_id)
-    cache = load_cache()
 
     log.info("=" * 40)
     log.info("中国移动10086签到 (共 %d 个账号)", len(openids))
