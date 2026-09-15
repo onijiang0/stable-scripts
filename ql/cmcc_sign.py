@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
-# @Description: 中国移动10086签到 - smallcat /wx/code 换 QWHD_SESSION_TOKEN + 每日签到
+# @Description: 中国移动10086签到 - smallcat /wx/oauth 公众号OAuth + 每日签到
 # cron: 30 8 * * *
 # ------------------------------------------
 # 变量名：cmcc
@@ -16,10 +16,12 @@
 # cmcc_touch_id  可选，默认 26-05-10005-2007-A01
 # ------------------------------------------
 # 契约：
-# smallcat  POST /wx/code  json:{openid, appid} -> data.code
-# OAuth     GET https://wx.10086.cn/qwhdhub/qwhdmark/{id}?code={code}&yx=..&touch_id=..
-#           跟随重定向累加 Cookie -> Set-Cookie: QWHD_SESSION_TOKEN
-# 签到      POST /qwhdhub/api/mark/do/mark  Cookie: QWHD_SESSION_TOKEN=...
+# 两段式公众号 OAuth（复刻傻妞 container.SmallCat.oauth）：
+#   ① POST {smallcat}/wx/oauth -> data.full_url
+#   ② GET full_url 跟随重定向，遇微信 authorize 停下，提取 bindAccount 回跳
+#   ③ POST {smallcat}/wx/oauth (redirect_uri=bindAccount回跳) -> full_url
+#   ④ GET full_url 跟随重定向 -> Set-Cookie: QWHD_SESSION_TOKEN
+# 签到 POST /qwhdhub/api/mark/do/mark  Cookie: QWHD_SESSION_TOKEN=...
 # 已签到关键词: 已签|重复|already|TODAY_MARKED
 # 缓存 6h；失败自动重登；多账号 sleep 3s
 # ------------------------------------------
@@ -87,6 +89,27 @@ class Smallcat:
             raise RuntimeError("smallcat 未返回 code（可能限流）")
         return code
 
+    def oauth(self, appid: str, openid: str, redirect_uri: str,
+              scope: str = "snsapi_base", state: str = "") -> str:
+        """
+        公众号 OAuth：POST /wx/oauth -> data.full_url
+        对应傻妞 container.SmallCat.oauth()，用于需要 wmhToken 的 H5 活动页。
+        """
+        r = self.s.post(
+            f"{self.base}/wx/oauth",
+            json={"appid": appid, "openid": openid, "scope": scope,
+                  "redirect_uri": redirect_uri, "state": state},
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if not data.get("status"):
+            raise RuntimeError(f"smallcat /wx/oauth 失败: {data.get('message')}")
+        full_url = (data.get("data") or {}).get("full_url") or ""
+        if not full_url:
+            raise RuntimeError(f"smallcat /wx/oauth 未返回 full_url: {str(data)[:200]}")
+        return full_url
+
 
 def parse_cookie_str(s: str) -> Dict[str, str]:
     m: Dict[str, str] = {}
@@ -103,12 +126,14 @@ def parse_cookie_str(s: str) -> Dict[str, str]:
 def follow_redirects(
     start_url: str,
     base_cookie: str = "",
+    stop_at_authorize: bool = False,
     max_hops: int = 20,
     timeout: int = 15,
 ) -> Tuple[Dict[str, str], int]:
     cookie_map = parse_cookie_str(base_cookie)
     current = start_url
     http_status = 0
+    authorize_marker = "open.weixin.qq.com/connect/oauth2/authorize"
 
     for _ in range(max_hops + 1):
         cookie_header = "; ".join(f"{k}={v}" for k, v in cookie_map.items())
@@ -126,6 +151,9 @@ def follow_redirects(
         for k, v in resp.cookies.get_dict().items():
             cookie_map[k] = v
         loc = resp.headers.get("Location", "")
+        if stop_at_authorize and loc and authorize_marker in loc:
+            cookie_map["_authorize_url"] = loc
+            break
         if 300 <= resp.status_code < 400 and loc:
             current = urljoin(current, loc)
             continue
@@ -189,39 +217,37 @@ def interpret_sign(raw: Dict[str, Any]) -> Tuple[bool, str]:
 def acquire_cookie(sm: Smallcat, cmcc: CMCC, appid: str, openid: str,
                    timeout: int = 30) -> Dict[str, str]:
     """
-    用 smallcat /wx/code 拿 code，拼到活动页 URL，跟随重定向拿 Cookie。
-    10086 活动页收到 code 后由服务端完成 SSO 并签发 QWHD_SESSION_TOKEN。
+    两段式公众号 OAuth（复刻傻妞 container.SmallCat.oauth）：
+    ① /wx/oauth(活动页) -> full_url -> 跟随到微信 authorize，提取 bindAccount 回跳
+    ② /wx/oauth(bindAccount回跳) -> full_url -> 跟随重定向 -> QWHD_SESSION_TOKEN
     """
-    code = sm.wx_code(openid, appid)
-    log.info("wx/code 获取成功: %s...", code[:12])
+    activity = f"{BASE}/qwhdhub/qwhdmark/{ACTIVITY_ID}?ys=&yx={cmcc.yx}&touch_id={cmcc.touch_id}"
 
-    # 拼活动页 URL，带上 code
-    activity = (
-        f"{BASE}/qwhdhub/qwhdmark/{ACTIVITY_ID}"
-        f"?code={quote(code)}"
-        f"&ys=&yx={cmcc.yx}&touch_id={cmcc.touch_id}"
-    )
+    # 第一段：活动页 -> 捕获微信 authorize 地址
+    full1 = sm.oauth(appid, openid, activity)
+    log.info("oauth(1) full_url 获取成功")
+    cm1, status1 = follow_redirects(full1, stop_at_authorize=True, timeout=timeout)
+    authorize_url = cm1.pop("_authorize_url", "")
+    if not authorize_url:
+        raise RuntimeError(f"未捕获到微信授权地址 (HTTP {status1})，smallcat 账号状态可能异常")
 
-    cm, status = follow_redirects(activity, timeout=timeout)
+    qs = parse_qs(urlparse(authorize_url).query)
+    bind_redirect = (qs.get("redirect_uri") or [""])[0]
+    if not bind_redirect:
+        raise RuntimeError("未能从微信授权地址解析出 bindAccount 回跳地址")
 
-    if "QWHD_SESSION_TOKEN" not in cm:
-        # 可能需要走 authorize 跳转，再试一次带 state
-        oauth_url = (
-            f"https://open.weixin.qq.com/connect/oauth2/authorize"
-            f"?appid={appid}"
-            f"&redirect_uri={quote(activity, safe='')}"
-            f"&response_type=code&scope=snsapi_base&state=STATE#wechat_redirect"
-        )
-        cm2, status2 = follow_redirects(oauth_url, timeout=timeout)
-        cm.update(cm2)
-        status = status2
+    # 第二段：带当日 sid 的 bindAccount 回跳 -> 完成 SSO
+    full2 = sm.oauth(appid, openid, bind_redirect)
+    log.info("oauth(2) full_url 获取成功")
+    base_ck = "; ".join(f"{k}={v}" for k, v in cm1.items())
+    cm2, status2 = follow_redirects(full2, base_cookie=base_ck, timeout=timeout)
 
-    if "QWHD_SESSION_TOKEN" not in cm:
+    if "QWHD_SESSION_TOKEN" not in cm2:
         raise RuntimeError(
-            f"未获取到 QWHD_SESSION_TOKEN (HTTP {status})。"
+            f"未获取到 QWHD_SESSION_TOKEN (HTTP {status2})。"
             f"请确认 smallcat 账号已授权该公众号 (appid={appid})"
         )
-    return cm
+    return cm2
 
 
 # ========== 缓存 ==========
