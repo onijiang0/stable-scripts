@@ -3,7 +3,7 @@
 # /*
 # ------------------------------------------
 # @Description: 中国移动10086签到 - 小程序 SSO 全链路
-# cron: 30 8 * * *
+# cron: 30 14 * * *
 # ------------------------------------------
 # 变量名：cmcc
 # 变量值：smallcat openid，多账号 & 或换行分隔
@@ -12,6 +12,7 @@
 #   wx_server_url  必填 smallcat Base
 #   wx_auth        必填 调用 API AUTH（请求头 auth）
 #   cmcc_execute   可选 0=只验登录链不签到；默认 1 执行签到
+#   cmcc_delay_min / cmcc_delay_max  可选 账号间隔随机秒，默认 8~25
 #   cmcc_yx / cmcc_touch_id 可选
 #
 # 链路（源码已核实）：
@@ -31,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import ssl
 import subprocess
@@ -66,6 +68,16 @@ UA = (
 )
 ALREADY_RE = re.compile(r"已签|已经签|签到过|重复|already|TODAY_MARKED", re.I)
 CTX = ssl._create_unverified_context()
+
+
+def jitter(lo: float, hi: float) -> float:
+    """随机延时，打散请求时间，降低风控。"""
+    a, b = lo, hi
+    if a > b:
+        a, b = b, a
+    sec = random.uniform(a, b)
+    time.sleep(sec)
+    return sec
 # 小程序 encryptData 双层 base64 + AES-128-CBC（源码 AesDecryptNew）
 AES_KEY = b"1234123412ABCDEF"
 AES_IV = b"ABCDEF1234123412"
@@ -264,6 +276,7 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
     log.info("1) /wx/code appid=%s openid=%s", MP_APPID, mask(openid))
     code = sm.wx_code(openid, MP_APPID)
     log.info("   code ok len=%d", len(code))
+    jitter(0.8, 2.5)
 
     log.info("2) login %s", MP_BASE)
     st, sc, body = http_request(
@@ -281,6 +294,7 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
     if not session_id:
         raise RuntimeError(f"login 无 sessionId: {str(j)[:200]}")
     log.info("   sessionId=%s", mask(session_id))
+    jitter(0.8, 2.5)
 
     log.info("3) wmhsso SSO_YQS")
     st2, _, body2 = http_request(
@@ -299,6 +313,7 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
     if not wmh:
         raise RuntimeError(f"wmhsso 无 token: {str(j2)[:200]}")
     log.info("   wmhToken=%s", mask(wmh))
+    jitter(1.0, 3.0)
 
     referer = (
         f"{H5_BASE}/qwhdhub/qwhdmark/{ACTIVITY_ID}"
@@ -447,16 +462,26 @@ def main() -> int:
         log.error("无 openid")
         return 1
 
+    delay_min = float(os.getenv("cmcc_delay_min", "8") or 8)
+    delay_max = float(os.getenv("cmcc_delay_max", "25") or 25)
+
     mode = "执行签到" if execute else "DRY-RUN（仅验证登录链，不调 mark）"
     print("=" * 40)
     print(f"  中国移动10086 | {mode} | {len(openids)} 账号")
+    print(f"  账号间隔随机延时 {delay_min:.0f}~{delay_max:.0f}s")
     print("=" * 40)
 
     lines: List[str] = []
-    for oid in openids:
+    for idx, oid in enumerate(openids):
+        if idx > 0:
+            w = jitter(delay_min, delay_max)
+            log.info("随机延时 %.1fs 后处理下一账号", w)
         label = ""
         try:
             cm = acquire_mark_session(base, oid, yx, touch_id)
+            # 签到前再抖一下
+            w = jitter(1.5, 5.0)
+            log.info("签到前延时 %.1fs", w)
             try:
                 info = prize_info(cm, yx, touch_id)
                 bd = info.get("data") or {}
@@ -479,7 +504,6 @@ def main() -> int:
             label = f"❌ [{mask(oid)}] {e}"
         log.info(label)
         lines.append(label)
-        time.sleep(2)
 
     ok_n = sum(1 for x in lines if x.startswith("✅"))
     print("\n" + "=" * 40)
