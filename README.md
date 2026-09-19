@@ -7,6 +7,7 @@
 ## 📂 目录导航
 * `ql/`：青龙面板定时任务脚本（签到、积分、活动类，Python / JS 混排）
 * `sillygirl/`：傻妞机器人插件（直接放入傻妞插件目录使用）
+* `archive/`：**已停用的历史脚本归档**，不参与运行。归档规则见 [`archive/README.md`](./archive/README.md)
 
 ### ql/ 脚本一览
 | 文件 | 目标站点 | 变量名 | cron |
@@ -15,13 +16,13 @@
 | `iqoo_sign.py` | iQOO 社区（签到/浏览/点赞/分享/评论/发帖/抽奖/积分） | `iqoo` | `10 14 * * *` |
 | `mth12580_sign.py` | 12580mth（大参林 / ddwhcb）签到 | `mth12580` | `25 14 * * *` |
 | `xboxjlb_sign.py` | Xbox 俱乐部·有赞小程序签到 | `xboxjlb` | `40 14 * * *` |
-| `cmcc_sign.js` | 中国移动 10086 签到领流量（`qwhdmark` HTTP 接口） | `cmcc` | `30 8 * * *` |
-| `cmcc_sign.py` | 中国移动 10086 签到（smallcat `/wx/oauth` 公众号 OAuth，两段式授权） | `cmcc` | `30 8 * * *` |
-| `cmcc_sign_oauth.js` | 中国移动 10086 签到（Node 版，`/wx/oauth` + 完整跳转链，支持手动 Cookie 逃逸） | `cmcc` | `30 8 * * *` |
+| `cmcc_sign.py` | 中国移动 10086 签到（小程序 SSO 全链路 `login` → `wmhsso` → `wmhToken` → `mark`） | `cmcc` | `30 14 * * *` |
 | `oppo_sign.js` | OPPO 小程序会员查询 / 积分签到 / 做任务赚积分 | `oppo` | `21 8 * * *` |
 
-> 10086 签到有三份实现（`cmcc_sign.js` / `cmcc_sign.py` / `cmcc_sign_oauth.js`），
-> 变量名同为 `cmcc`，**同一账号只跑其中一份即可**，避免重复签到互相干扰。
+> 10086 签到原先有三份并行实现（`cmcc_sign.js` / `cmcc_sign.py` / `cmcc_sign_oauth.js`），
+> 变量名同为 `cmcc`，同账号重复启用会互相干扰。已于 2026-09-19 统一为 `cmcc_sign.py`，
+> 另两份移入 [`archive/2026-09-19-cmcc-duplicates/`](./archive/2026-09-19-cmcc-duplicates/)，
+> 恢复方法见该目录下的 `NOTE.md`。
 
 ### sillygirl/ 插件一览
 | 文件 | 功能 | 触发命令 | cron |
@@ -34,8 +35,19 @@
 3. 在青龙面板 / 傻妞后台新建任务，粘贴脚本内容并配置对应环境变量。
 4. 运行脚本。
 
-> ⚠️ `ql/` 下的脚本依赖青龙容器内的运行环境（如 `cmcc_sign.js` 需要 `../tools/env.js`），
+> ⚠️ `ql/` 下的脚本依赖青龙容器内的运行环境（如 `oppo_sign.js` 需要 `../tools/env.js`），
 > **不能直接在本机运行**，请放入青龙面板使用。
+
+## 🗄️ 归档过期脚本
+脚本被取代或对应活动下线后，**不要直接删除**，按下面四步归档到 `archive/`：
+
+1. 用 `git mv` 移入 `archive/YYYY-MM-DD-主题/`（用 `git mv` 而非删除重建，保留文件历史）。
+2. 在该目录写 `NOTE.md`，写清：归档日期 / 归档原因 / 被谁取代 / 恢复方法。
+3. **同步停用青龙面板或傻妞里对应的定时任务** —— 归档只是移走文件，
+   cron 不会自动消失，不处理会持续报错。
+4. 在 [`archive/README.md`](./archive/README.md) 的索引表登记一行。
+
+完整规则与恢复命令见 [`archive/README.md`](./archive/README.md)。
 
 ## 🛡️ 安全与配置
 本仓库**严禁**提交任何私人 Token、Cookie、API Key、密码或服务器真实 IP。
