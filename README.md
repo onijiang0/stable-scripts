@@ -15,8 +15,13 @@
 | `iqoo_sign.py` | iQOO 社区（签到/浏览/点赞/分享/评论/发帖/抽奖/积分） | `iqoo` | `10 14 * * *` |
 | `mth12580_sign.py` | 12580mth（大参林 / ddwhcb）签到 | `mth12580` | `25 14 * * *` |
 | `xboxjlb_sign.py` | Xbox 俱乐部·有赞小程序签到 | `xboxjlb` | `40 14 * * *` |
-| `cmcc_sign.js` | 中国移动 10086 签到领流量 | `cmcc` | `30 8 * * *` |
+| `cmcc_sign.js` | 中国移动 10086 签到领流量（`qwhdmark` HTTP 接口） | `cmcc` | `30 8 * * *` |
+| `cmcc_sign.py` | 中国移动 10086 签到（smallcat `/wx/oauth` 公众号 OAuth，两段式授权） | `cmcc` | `30 8 * * *` |
+| `cmcc_sign_oauth.js` | 中国移动 10086 签到（Node 版，`/wx/oauth` + 完整跳转链，支持手动 Cookie 逃逸） | `cmcc` | `30 8 * * *` |
 | `oppo_sign.js` | OPPO 小程序会员查询 / 积分签到 / 做任务赚积分 | `oppo` | `21 8 * * *` |
+
+> 10086 签到有三份实现（`cmcc_sign.js` / `cmcc_sign.py` / `cmcc_sign_oauth.js`），
+> 变量名同为 `cmcc`，**同一账号只跑其中一份即可**，避免重复签到互相干扰。
 
 ### sillygirl/ 插件一览
 | 文件 | 功能 | 触发命令 | cron |
