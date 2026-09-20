@@ -368,7 +368,59 @@ def cookie_header(cm: Dict[str, str]) -> str:
     return "; ".join(f"{k}={v}" for k, v in cm.items())
 
 
-def interpret_sign(raw: Dict[str, Any]) -> Tuple[bool, str]:
+PRIZE_KEYS = (
+    "prizeName", "prize_name", "rewardName", "reward_name",
+    "awardName", "award_name", "giftName", "gift_name",
+    "prizeDesc", "prize_desc", "rewardDesc", "awardDesc",
+    "todayPrize", "today_prize", "currentPrize", "markedPrize",
+    "packageName", "package_name", "flowName", "dataName",
+    "title", "name",
+)
+
+
+def _collect_prize_names(obj: Any, out: List[str], depth: int = 0) -> None:
+    if depth > 5 or len(out) >= 6:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = str(k)
+            if kl.lower() in {x.lower() for x in PRIZE_KEYS} or kl in (
+                "prizeName", "prizeList", "rewardList", "awardList",
+                "todayPrize", "prizeInfo", "rewards", "prizes",
+            ):
+                if isinstance(v, str) and v.strip() and len(v) <= 80:
+                    if v.strip() not in out:
+                        out.append(v.strip())
+                elif isinstance(v, (dict, list)):
+                    _collect_prize_names(v, out, depth + 1)
+            elif kl.lower() in ("prizelist", "rewardlist", "awardlist", "list", "items", "data", "prize"):
+                _collect_prize_names(v, out, depth + 1)
+    elif isinstance(obj, list):
+        for it in obj[:8]:
+            _collect_prize_names(it, out, depth + 1)
+
+
+def extract_prize_summary(*payloads: Any) -> str:
+    """从 prizeInfo / mark 返回中提取奖励文案，供日志打印。"""
+    names: List[str] = []
+    for p in payloads:
+        if not p:
+            continue
+        _collect_prize_names(p, names)
+    # 过滤明显不是奖品的通用词
+    skip = {"成功", "ok", "OK", "null", "none", "未签到", "已签到"}
+    names = [n for n in names if n and n not in skip]
+    # 去重保序
+    seen = set()
+    uniq = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    return "、".join(uniq[:4])
+
+
+def interpret_sign(raw: Dict[str, Any], prize_hint: str = "") -> Tuple[bool, str]:
     if not raw or not isinstance(raw, dict):
         return False, "未知返回"
     code = str(raw.get("code") or "")
@@ -380,15 +432,17 @@ def interpret_sign(raw: Dict[str, Any]) -> Tuple[bool, str]:
         or "全部签完" in msg
         or "已经全部" in msg
     )
-    if success or code in ("SUCCESS", "0", "0") or is_done:
-        prize = ((raw.get("data") or {}) or {}).get("prizeName")
+    prize = extract_prize_summary(raw.get("data"), raw) or prize_hint
+    if success or code in ("SUCCESS", "0") or is_done:
         if is_done:
             label = msg or "今日已签到/已签完"
         else:
             label = msg or "签到成功"
         if prize:
-            label += f" | 奖品: {prize}"
+            label += f" | 奖励: {prize}"
         return True, label
+    if prize:
+        return False, (msg or f"code={code}") + f" | 奖励: {prize}"
     return False, msg or f"code={code}"
 
 
@@ -474,19 +528,32 @@ def main() -> int:
         try:
             cm = acquire_mark_session(base, oid, yx, touch_id)
             jitter(1.5, 5.0)
+            prize_hint = ""
+            info = None
             try:
                 info = prize_info(cm, yx, touch_id)
                 bd = info.get("data") or {}
-                log.debug("prize %s/%s today=%s",
-                          bd.get("markedTimes"), bd.get("totalMarkTimes"), bd.get("todayMarked"))
+                prize_hint = extract_prize_summary(info)
+                # 进度一行（仍保持简短）
+                mt = bd.get("markedTimes")
+                tt = bd.get("totalMarkTimes")
+                tm = bd.get("todayMarked")
+                if mt is not None or tm is not None:
+                    print(f"  进度 {mt}/{tt} 今日已签={tm}"
+                          + (f" 奖励={prize_hint}" if prize_hint else ""))
             except Exception:
                 pass
 
             if not execute:
                 label = f"✅ [{mask(oid)}] 登录链 OK（未执行签到）"
+                if prize_hint:
+                    label += f" | 奖励: {prize_hint}"
             else:
                 raw = do_mark(cm, yx, touch_id)
-                ok, msg = interpret_sign(raw)
+                ok, msg = interpret_sign(raw, prize_hint=prize_hint)
+                # mark 成功但没文案时，再用 prizeInfo 补一次
+                if ok and prize_hint and "奖励:" not in msg:
+                    msg = f"{msg} | 奖励: {prize_hint}"
                 label = ("✅" if ok else "❌") + f" [{mask(oid)}] {msg}"
         except Exception as e:
             label = f"❌ [{mask(oid)}] {e}"
