@@ -12,11 +12,10 @@
 # wx_server_url    必填，wx_server 地址（勿写进仓库）
 # wx_auth          必填，wx_server 鉴权值（/wx/code 用）
 # xxy_appid        可选，默认 wxfc766f1e9a63b01f
-# PLUSPLUS_TOKEN   可选，PushPlus
-# QYWX_TOKEN       可选，企业微信机器人 key
 # PROXY_API        可选，HTTP/socks5 代理提取地址
 # PROXY_TYPE       可选，http / socks5
 # QL_NOTIFY        可选，设为 0 关闭推送
+# 注：推送只走 tools/sendNotify.js，不读 PushPlus 等推送环境变量
 #
 # 契约（appid wxfc766f1e9a63b01f）：
 # code     POST {wx_server_url}/wx/code  auth:{wx_auth}  json:{openid,appid}
@@ -60,8 +59,6 @@ log = logging.getLogger("XXY")
 APP_NAME = "芯享会（心相印）"
 APPID = (os.getenv("xxy_appid") or "wxfc766f1e9a63b01f").strip()
 
-PLUSPLUS_TOKEN = os.getenv("PLUSPLUS_TOKEN", "")
-QYWX_TOKEN = os.getenv("QYWX_TOKEN", "")
 PROXY_API = os.getenv("PROXY_API", "")
 PROXY_TYPE = os.getenv("PROXY_TYPE", "http").lower()
 PROXY_RETRY_TIMES = 3
@@ -110,23 +107,28 @@ def split_openids(raw: str) -> List[str]:
     return out
 
 
-def send_notify(title: str, content: str) -> None:
-    """按仓库 tools/sendNotify.js 推送（优先 node，失败则 PushPlus HTTP）。"""
-    if (os.getenv("QL_NOTIFY") or "").strip().lower() in ("0", "false", "no"):
-        print("[notify] QL_NOTIFY=0，跳过推送")
-        return
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(here, "..", "tools", "sendNotify.js"),
-        "/ql/data/scripts/tools/sendNotify.js",
-        "/ql/data/scripts/sendNotify.js",
-    ]
-    js = None
-    for p in candidates:
-        if os.path.isfile(p):
-            js = os.path.normpath(p)
-            break
-    if js:
+try:
+    from send_notify import send_notify
+except Exception:
+    def send_notify(title: str, content: str) -> None:
+        """只调用 tools/sendNotify.js，不读 PushPlus 环境变量。"""
+        if (os.getenv("QL_NOTIFY") or "").strip().lower() in ("0", "false", "no"):
+            print("[notify] QL_NOTIFY=0，跳过推送")
+            return
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(here, "..", "tools", "sendNotify.js"),
+            "/ql/data/scripts/tools/sendNotify.js",
+            "/ql/data/scripts/sendNotify.js",
+        ]
+        js = None
+        for p in candidates:
+            if os.path.isfile(p):
+                js = os.path.normpath(p)
+                break
+        if not js:
+            print("[notify] 未找到 tools/sendNotify.js")
+            return
         runner = (
             "const m=require(process.argv[1]);"
             "const fn=m.sendNotify||m.default||m;"
@@ -134,11 +136,13 @@ def send_notify(title: str, content: str) -> None:
             ".then(()=>console.log('[notify] sendNotify.js ok'))"
             ".catch(e=>{console.error(e);process.exit(1)});"
         )
-        for node in (os.environ.get("MIMO_NODE") or "node", "nodejs", "node"):
+        for node in (os.environ.get("node") or "node", "nodejs", "node"):
             try:
                 r = subprocess.run(
                     [node, "-e", runner, js, title, content],
-                    capture_output=True, timeout=25, text=True,
+                    capture_output=True,
+                    timeout=25,
+                    text=True,
                 )
                 if r.stdout:
                     print(r.stdout.strip()[-200:])
@@ -150,32 +154,6 @@ def send_notify(title: str, content: str) -> None:
                 continue
             except Exception as e:
                 print("[notify] node 异常:", e)
-    # PushPlus 兜底（与 tools/sendNotify.js 相同变量名）
-    token = (
-        os.getenv("PUSHPLUS_TOKEN")
-        or os.getenv("PUSH_PLUS_TOKEN")
-        or os.getenv("PUSHPLUS_KEY")
-        or PLUSPLUS_TOKEN
-        or ""
-    ).strip()
-    if not token:
-        print("[notify] 无 PUSHPLUS token，且 sendNotify.js 未成功")
-        return
-    try:
-        resp = requests.post(
-            "https://www.pushplus.plus/send",
-            json={
-                "token": token,
-                "title": title,
-                "content": content,
-                "topic": os.getenv("PUSHPLUS_TOPIC") or "",
-                "template": "txt",
-            },
-            timeout=15,
-        )
-        print("[notify] PushPlus", resp.text[:120])
-    except Exception as e:
-        print("[notify] PushPlus 失败:", e)
 
 
 class Smallcat:
