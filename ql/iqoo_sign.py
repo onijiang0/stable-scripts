@@ -13,8 +13,8 @@
 # wx_auth           必填，smallcat 调用 API AUTH
 # wx_server_url     必填，wx_server 地址（勿写进仓库）
 # iqoo_appid        默认 wxcf4266fbc9463132
-# iqoo_browse       默认 4，浏览帖子篇数（多来源拉未读帖）
-# iqoo_like         默认 4，点赞次数
+# iqoo_browse       脚本内默认 0（已关闭浏览任务）；环境变量可覆盖，但默认不浏览
+# iqoo_like         默认 4，点赞次数（不跳过已赞帖，服务端自行判定）
 # iqoo_share        默认 4，分享次数
 # iqoo_comment      默认 1，评论次数（内容来自一言，去掉来源后缀）
 # iqoo_draw         默认 1=只抽每日免费第一抽（当天已中奖则跳过）；0=不抽
@@ -23,7 +23,7 @@
 # ========== 已实现 ==========
 # 1. 登录：smallcat getphonenumber + code -> v3/users/vivo/mini 拿 accessToken
 # 2. 签到：POST v3/sign（已签则识别「已经签到」）
-# 3. 点赞：POST v3/posts.update，跳过 isLiked=true 的帖
+# 3. 点赞：POST v3/posts.update，**不跳过** isLiked=true（由服务端判定）
 # 4. 分享：POST v3/thread.share
 # 5. 评论：POST v3/posts.create，内容一言 hitokoto（只取正文，去掉「——出处」）
 # 6. 发帖：POST v3/thread.create 到「聊游戏」categoryId=21
@@ -49,7 +49,7 @@
 #    不是每个 openid 都能取手机号（有的返回 js-login code empty）
 # 7. thread.list 的 pageData 字段是 threadId；推荐列表字段是 id
 #    v4/categories/{id}/threads 的 Data.data[] 用 id
-# 8. 同日重跑：已签/已赞/已抽/已发帖(限1) 会跳过，属预期；点赞上限4、分享上限4
+# 8. 同日重跑：已签/已抽/已发帖(限1) 会跳过；点赞不因已赞跳过
 #
 # 契约（bbs-api.iqoo.com + smallcat）：
 # 登录  getphonenumber + code -> v3/users/vivo/mini -> accessToken
@@ -268,9 +268,10 @@ class IqooApi:
         return out[: max(n, 6)]
 
     def list_threads(self, n: int) -> List[dict]:
-        """点赞/分享/评论用：推荐帖优先。"""
+        """点赞/分享/评论用：多接口回退，失败写日志。"""
         seen: set = set()
         out: List[dict] = []
+        errs: List[str] = []
 
         def add(lst):
             for t in lst or []:
@@ -285,10 +286,35 @@ class IqooApi:
                     t["id"] = t["threadId"]
                 out.append(t)
 
-        d = self.call("GET", "v5/recommend/thread/list", params={"page": 1, "perPage": 20})
-        add((d.get("Data") or {}).get("data"))
-        d = self.call("GET", "v3/thread.list", params={"page": 1, "perPage": 10})
-        add((d.get("Data") or {}).get("pageData"))
+        sources = [
+            ("v5/recommend/thread/list", {"page": 1, "perPage": 20}, ("data", "pageData")),
+            ("v3/thread.list", {"page": 1, "perPage": 10}, ("pageData", "data")),
+        ]
+        for cid in (21, 26, 27, 28, 45, 16, 9, 10):
+            sources.append(
+                (f"v4/categories/{cid}/threads", {"page": 1, "perPage": 10}, ("data", "pageData"))
+            )
+
+        for ep, params, keys in sources:
+            if len(out) >= max(n, 8):
+                break
+            d = self.call("GET", ep, params=params)
+            code = d.get("Code")
+            if code not in (0, None, "0"):
+                errs.append(f"{ep}:{code}")
+                continue
+            data = d.get("Data") or {}
+            lst = None
+            for k in keys:
+                if data.get(k):
+                    lst = data.get(k)
+                    break
+            add(lst)
+
+        if not out:
+            print(f"[iqoo] 获取帖子列表失败: {errs or '空列表'}")
+        elif errs:
+            print(f"[iqoo] 帖子列表部分失败: {errs}")
         return out[: max(n, 8)]
 
     def browse(self, threads: List[dict], n: int) -> List[str]:
@@ -309,12 +335,12 @@ class IqooApi:
         return lines
 
     def like(self, threads: List[dict], n: int) -> List[str]:
+        """点赞：不跳过已赞帖，统一发起 posts.update，结果以服务端为准。"""
         lines = []
+        if n <= 0:
+            return ["点赞关闭"]
         ok_n = 0
         for t in threads[:n]:
-            if t.get("isLiked"):
-                lines.append(f"跳过已赞#{t.get('id')}")
-                continue
             tid = t.get("id") or t.get("threadId")
             pid = t.get("postId") or t.get("pid")
             body: Dict[str, Any] = {"id": tid, "data": {"attributes": {"isLiked": True}}}
@@ -322,11 +348,15 @@ class IqooApi:
                 body["postId"] = pid
             r = self.call("POST", "v3/posts.update", body=body)
             ok = r.get("Code") == 0
-            lines.append(f"点赞#{tid} {'OK' if ok else str(r.get('Message'))[:40]}")
+            extra = ""
+            if t.get("isLiked"):
+                extra = "(原本已赞)"
+            msg = str(r.get("Message") or r.get("Code") or "")[:40]
+            lines.append(f"点赞#{tid} {'OK' if ok else msg}{extra}")
             if ok:
                 ok_n += 1
             time.sleep(0.8)
-        lines.append(f"点赞完成{ok_n}次")
+        lines.append(f"点赞完成{ok_n}/{min(n, len(threads))}次")
         return lines
 
     def share(self, threads: List[dict], n: int) -> List[str]:
@@ -460,19 +490,28 @@ def run_account(
 
     lines.append(api.sign())
 
-    need = max(browse_n, like_n, share_n, comment_n, 2)
+    need = max(like_n, share_n, comment_n, 2)
     threads = api.list_threads(need)
-    browse_src = api.browse_pool(max(browse_n, 4))
-    lines.append(f"候选帖{len(threads)}篇 浏览池{len(browse_src)}篇")
+    lines.append(f"候选帖{len(threads)}篇")
 
-    try:
-        lines.extend(api.browse(browse_src, browse_n))
-    except Exception as e:
-        lines.append(f"浏览异常 {e}")
-    try:
-        lines.extend(api.like(threads, like_n))
-    except Exception as e:
-        lines.append(f"点赞异常 {e}")
+    # 浏览任务默认在脚本内关闭（browse_n=0）；仅当明确 >0 时执行
+    if browse_n > 0:
+        browse_src = api.browse_pool(max(browse_n, 4))
+        lines.append(f"浏览池{len(browse_src)}篇")
+        try:
+            lines.extend(api.browse(browse_src, browse_n))
+        except Exception as e:
+            lines.append(f"浏览异常 {e}")
+    else:
+        lines.append("浏览任务已关闭(脚本内 iqoo_browse=0)")
+
+    if like_n > 0:
+        try:
+            lines.extend(api.like(threads, like_n))
+        except Exception as e:
+            lines.append(f"点赞异常 {e}")
+    else:
+        lines.append("点赞关闭")
     try:
         lines.extend(api.share(threads, share_n))
     except Exception as e:
@@ -509,7 +548,8 @@ def main() -> int:
     auth = os.getenv("wx_auth", "").strip()
     sc = os.getenv("wx_server_url", "").strip()
     appid = os.getenv("iqoo_appid", "wxcf4266fbc9463132").strip()
-    browse_n = int(os.getenv("iqoo_browse", "2") or "2")
+    # 脚本内默认关闭浏览；如需开启请设 iqoo_browse>0
+    browse_n = int(os.getenv("iqoo_browse", "0") or "0")
     like_n = int(os.getenv("iqoo_like", "4") or "4")
     share_n = int(os.getenv("iqoo_share", "4") or "4")
     comment_n = int(os.getenv("iqoo_comment", "1") or "1")
