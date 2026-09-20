@@ -372,7 +372,14 @@ def main() -> int:
     print("\n" + "=" * 36)
     print("   Xbox俱乐部签到简报(小程序)")
     print("=" * 36)
-    print("\n".join(all_lines))
+    _report = "\n".join(all_lines)
+    print(_report)
+    try:
+        from notify_report import send_ql_notify
+
+        send_ql_notify("Xbox俱乐部签到简报", _report)
+    except Exception as _ne:
+        print("[notify] 跳过:", _ne)
     return 0
 
 

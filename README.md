@@ -6,6 +6,7 @@
 
 ## 📂 目录导航
 * `ql/`：微信小程序类定时任务脚本（签到、积分、活动，Python / JS 混排）
+* `tools/`：青龙推送与 JS 运行时工具（`env.js` / `sendNotify.js`），**上传到青龙 `scripts/tools/`**
 * `sillygirl/`：傻妞机器人插件（直接放入傻妞插件目录使用）
 * `archive/`：**已停用的历史脚本归档**，不参与运行。归档规则见 [`archive/README.md`](./archive/README.md)
 
@@ -14,9 +15,22 @@
 | 本仓库目录 | 上传到青龙面板的目标目录 |
 |---|---|
 | `ql/` | `wxapp/` |
+| `tools/` | `tools/`（与 `wxapp/` 同级） |
 | `sillygirl/` | 傻妞插件目录（不进青龙） |
 
 `ql/` 是「微信小程序脚本」这类任务在本仓库的叫法；在青龙面板里，它们统一放在 **`wxapp`** 文件夹下。
+
+### 推送（sendNotify）
+
+`ql/` 下脚本在结束时会调用 `notify_report.py`（位于 `wxapp/`），或 `oppo_sign.js` 通过 `../tools/env.js` → `tools/sendNotify.js` 推送简报。
+
+| 环境变量 | 说明 |
+|---|---|
+| `PUSHPLUS_TOKEN` 或 `PUSH_PLUS_TOKEN` 或 `PUSHPLUS_KEY` | PushPlus 令牌（任一即可） |
+| `PUSHPLUS_TOPIC` | 可选，PushPlus 群组编码 |
+| `QL_NOTIFY` | 设为 `0` 可关闭推送 |
+
+部署顺序：先上传 `tools/`，再上传 `ql/` → `wxapp/`。
 
 ### ql/ 脚本一览
 | 文件 | 目标站点 | 变量名 | cron |
@@ -50,6 +64,7 @@
 
 > ⚠️ `ql/` 下的脚本依赖青龙容器内的运行环境（如 `oppo_sign.js` 需要 `../tools/env.js`），
 > **不能直接在本机运行**，请放入青龙面板使用。
+> `tools/` 必须与 `wxapp/` 同级上传到青龙，否则 JS 脚本找不到 `env.js`/`sendNotify.js`。
 
 ## 🗄️ 归档过期脚本
 脚本被取代或对应活动下线后，**不要直接删除**，按下面四步归档到 `archive/`：

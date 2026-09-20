@@ -542,7 +542,14 @@ def main() -> int:
     print("\n" + "=" * 36)
     print("      iQOO社区任务简报")
     print("=" * 36)
-    print("\n".join(all_lines))
+    _report = "\n".join(all_lines)
+    print(_report)
+    try:
+        from notify_report import send_ql_notify
+
+        send_ql_notify("iQOO社区任务简报", _report)
+    except Exception as _ne:
+        print("[notify] 跳过:", _ne)
     return 0
 
 

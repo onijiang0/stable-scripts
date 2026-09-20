@@ -521,6 +521,7 @@ async function main() {
     $.checkEnv(CK_NAME);
     if (!$.userCount) {
         $.log(`未找到变量 ${CK_NAME}`);
+        await $.done("OPPO 未配置账号");
         return;
     }
     for (let i = 0; i < $.userList.length; i++) {
@@ -528,8 +529,15 @@ async function main() {
         await task.run();
         if (i < $.userList.length - 1) await $.wait(1500, 3000);
     }
+    // tools/env.js.done() 会调用 ../tools/sendNotify.js
+    await $.done("OPPO会员签到简报");
 }
 
 main()
-    .catch((e) => $.log(`脚本异常: ${e.message || e}`))
-    .finally(() => $.done());
+    .catch(async (e) => {
+        $.log(`脚本异常: ${e.message || e}`);
+        await $.done("OPPO脚本异常");
+    })
+    .finally(() => {
+        /* done 已在 main/catch 中调用 */
+    });

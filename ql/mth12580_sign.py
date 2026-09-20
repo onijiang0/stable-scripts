@@ -298,7 +298,14 @@ def main() -> int:
     print("\n" + "=" * 36)
     print("      12580mth 签到简报")
     print("=" * 36)
-    print("\n".join(lines))
+    _report = "\n".join(lines)
+    print(_report)
+    try:
+        from notify_report import send_ql_notify
+
+        send_ql_notify("12580mth签到简报", _report)
+    except Exception as _ne:
+        print("[notify] 跳过:", _ne)
     return 0
 
 
