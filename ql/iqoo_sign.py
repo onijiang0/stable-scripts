@@ -23,12 +23,12 @@
 # ========== 已实现 ==========
 # 1. 登录：smallcat getphonenumber + code -> v3/users/vivo/mini 拿 accessToken
 # 2. 签到：POST v3/sign（已签则识别「已经签到」）
-# 3. 点赞：POST v3/posts.update，**不跳过** isLiked=true（由服务端判定）
-# 4. 分享：POST v3/thread.share
-# 5. 评论：POST v3/posts.create，内容一言 hitokoto（只取正文，去掉「——出处」）
-# 6. 发帖：POST v3/thread.create 到「聊游戏」categoryId=21
-# 7. 抽奖：只抽每日免费第一抽；查 v3/user.winning.list 当天已有 created_at 则跳过
-# 8. 积分：起止各取一次，日志打印「酷币 a -> b（+delta）」
+# 3. 点赞：先读今日进度，满 4 停；不跳过已赞帖
+# 4. 分享：先读今日进度，满 4 停
+# 5. 评论/发帖：共用今日 post 配额，先读进度，满则停
+# 6. 抽奖：先查中奖记录/抽奖池，已抽则跳过
+# 7. 浏览：默认关闭；开启时也先读 view 进度
+# 8. 任务前统一打印今日进度预读
 # 9. 多账号：openid 换行分隔，账号间 sleep 3s
 #
 # ========== 踩坑 / 限制 ==========
@@ -332,12 +332,39 @@ class IqooApi:
             print(f"[iqoo] 帖子列表部分失败: {errs}")
         return out[: max(n, 8)]
 
+    def _remain_quota(self, count_key: str, upper_key: str, hard_cap: int, label: str):
+        """读今日进度，返回 (日志列表, done_today, upper, remain)。"""
+        lines: List[str] = []
+        try:
+            prog = self.progress_raw()
+        except Exception as e:
+            prog = {}
+            lines.append(f"读取今日{label}进度失败: {e}")
+        done = int(prog.get(count_key) or 0)
+        upper_raw = int(prog.get(upper_key) or hard_cap)
+        upper = min(upper_raw, hard_cap) if hard_cap > 0 else upper_raw
+        if upper <= 0:
+            upper = hard_cap
+        remain = max(0, upper - done)
+        lines.append(f"今日{label} {done}/{upper}（脚本硬顶{hard_cap if hard_cap>0 else upper}）")
+        return lines, done, upper, remain
+
     def browse(self, threads: List[dict], n: int) -> List[str]:
-        """尽量用未读帖；服务端 viewCount 可能不立刻涨，日志如实报。"""
-        lines = []
+        """浏览：先读 view 进度，满则跳过，避免重复刷。"""
+        if n <= 0:
+            return ["浏览关闭"]
+        lines, done, upper, remain = self._remain_quota(
+            "viewCount", "viewUpperLimit", max(n, 8), "浏览"
+        )
+        if remain <= 0:
+            lines.append("今日浏览已满，自动停止")
+            return lines
+        want = min(n, remain, len(threads) if threads else 0)
+        lines.append(f"本轮最多再浏览 {want} 篇")
         ok_n = 0
-        want = max(n, 4)
         for t in threads[:want]:
+            if ok_n >= remain:
+                break
             tid = t.get("id") or t.get("threadId")
             r = self.call("GET", "v3/thread.detail", params={"threadId": tid})
             ok = r.get("Code") == 0
@@ -345,42 +372,31 @@ class IqooApi:
             if ok:
                 ok_n += 1
             time.sleep(2)
-        p = self.progress()
-        lines.append(f"浏览完成{ok_n}篇 任务进度 view={p['view']}")
+        try:
+            p = self.progress_raw()
+            lines.append(
+                f"浏览后进度 {p['viewCount']}/{p['viewUpperLimit']} 本进程成功{ok_n}篇"
+            )
+        except Exception:
+            lines.append(f"浏览完成{ok_n}篇")
         return lines
 
     def like(self, threads: List[dict], n: int) -> List[str]:
-        """点赞：任务前先读今日进度；达到上限(默认4)自动停止，防重复执行超赞。
-
-        - 不跳过已赞帖，统一发起 posts.update
-        - 以服务端 likeCount/likeUpperLimit 为准，剩余多少赞多少
-        - 本进程成功满 4 次（或上限）即停
-        """
-        lines = []
+        """点赞：先读今日进度；达到上限(默认4)自动停止。不跳过已赞帖。"""
         if n <= 0:
             return ["点赞关闭"]
-
-        HARD_CAP = 4  # 单日硬顶，防止多开脚本继续加赞
-        try:
-            prog = self.progress_raw()
-        except Exception as e:
-            prog = {"likeCount": 0, "likeUpperLimit": HARD_CAP}
-            lines.append(f"读取今日进度失败: {e}")
-
-        done_today = prog.get("likeCount", 0)
-        upper = int(prog.get("likeUpperLimit") or HARD_CAP)
-        upper = min(upper, HARD_CAP)
-        remain = max(0, upper - done_today)
-        lines.append(f"今日已赞 {done_today}/{upper}（脚本硬顶{HARD_CAP}）")
+        HARD_CAP = 4
+        lines, done_today, upper, remain = self._remain_quota(
+            "likeCount", "likeUpperLimit", HARD_CAP, "点赞"
+        )
         if remain <= 0:
             lines.append("今日点赞已满，自动停止")
             return lines
-
         want = min(n, remain)
         lines.append(f"本轮最多再赞 {want} 次")
         ok_n = 0
         for t in threads[:want]:
-            if ok_n >= remain or ok_n >= HARD_CAP:
+            if ok_n >= remain:
                 lines.append(f"已达上限 {upper}，停止点赞")
                 break
             tid = t.get("id") or t.get("threadId")
@@ -399,8 +415,6 @@ class IqooApi:
                     lines.append(f"已赞满 {done_today + ok_n}/{upper}，自动停止")
                     break
             time.sleep(0.8)
-
-        # 再核一次服务端进度
         try:
             after = self.progress_raw()
             lines.append(
@@ -411,17 +425,41 @@ class IqooApi:
         return lines
 
     def share(self, threads: List[dict], n: int) -> List[str]:
-        lines = []
+        """分享：先读今日进度，满则停，硬顶4。"""
+        if n <= 0:
+            return ["分享关闭"]
+        HARD_CAP = 4
+        lines, done, upper, remain = self._remain_quota(
+            "shareCount", "shareUpperLimit", HARD_CAP, "分享"
+        )
+        if remain <= 0:
+            lines.append("今日分享已满，自动停止")
+            return lines
+        want = min(n, remain)
+        lines.append(f"本轮最多再分享 {want} 次")
         ok_n = 0
-        for t in threads[:n]:
+        for t in threads[:want]:
+            if ok_n >= remain:
+                lines.append(f"已达上限 {upper}，停止分享")
+                break
             tid = t.get("id") or t.get("threadId")
             r = self.call("POST", "v3/thread.share", body={"threadId": tid})
             ok = r.get("Code") == 0
-            lines.append(f"分享#{tid} {'OK' if ok else str(r.get('Message'))[:40]}")
+            msg = str(r.get("Message") or r.get("Code") or "")[:40]
+            lines.append(f"分享#{tid} {'OK' if ok else msg}")
             if ok:
                 ok_n += 1
+                if ok_n >= remain:
+                    lines.append(f"已分享满 {done + ok_n}/{upper}，自动停止")
+                    break
             time.sleep(0.8)
-        lines.append(f"分享完成{ok_n}次")
+        try:
+            after = self.progress_raw()
+            lines.append(
+                f"分享后进度 {after['shareCount']}/{after['shareUpperLimit']} 本进程成功{ok_n}次"
+            )
+        except Exception:
+            lines.append(f"分享完成{ok_n}/{want}次")
         return lines
 
     def hitokoto(self) -> str:
@@ -429,15 +467,40 @@ class IqooApi:
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
                 d = json.loads(r.read().decode())
-            # 只要正文，去掉「——出处」后缀
             return (d.get("hitokoto") or "").strip()
         except Exception:
             return "今天也要加油鸭"
 
+    def _post_remain(self, lines: List[str], label: str) -> Tuple[int, int, int]:
+        """评论/发帖共用：读 postCount / createPostUpperLimit。"""
+        try:
+            prog = self.progress_raw()
+        except Exception as e:
+            prog = {}
+            lines.append(f"读取今日发帖/评论进度失败: {e}")
+        done = int(prog.get("postCount") or 0)
+        upper = int(prog.get("createPostUpperLimit") or 1)
+        if upper <= 0:
+            upper = 1
+        remain = max(0, upper - done)
+        lines.append(f"今日{label}进度 {done}/{upper}")
+        return done, upper, remain
+
     def comment(self, threads: List[dict], n: int) -> List[str]:
-        lines = []
+        """评论：与发帖共用今日 post 配额，先读进度，满则停。"""
+        if n <= 0:
+            return ["评论关闭"]
+        lines: List[str] = []
+        done, upper, remain = self._post_remain(lines, "评论/发帖")
+        if remain <= 0:
+            lines.append("今日评论/发帖已满，自动停止")
+            return lines
+        want = min(n, remain)
+        lines.append(f"本轮最多再评论 {want} 次")
         ok_n = 0
-        for t in threads[:n]:
+        for t in threads[:want]:
+            if ok_n >= remain:
+                break
             tid = t.get("id") or t.get("threadId")
             content = self.hitokoto()
             r = self.call(
@@ -446,16 +509,38 @@ class IqooApi:
                 body={"id": tid, "type": 0, "content": content, "source": "iQOO 13"},
             )
             ok = r.get("Code") == 0
-            lines.append(f"评论#{tid} {'OK' if ok else str(r.get('Message'))[:40]} 「{content[:20]}」")
+            msg = str(r.get("Message") or r.get("Code") or "")[:40]
+            lines.append(f"评论#{tid} {'OK' if ok else msg} 「{content[:20]}」")
             if ok:
                 ok_n += 1
+                if ok_n >= remain:
+                    lines.append(f"今日评论/发帖已满 {done + ok_n}/{upper}，停止")
+                    break
             time.sleep(1)
-        lines.append(f"评论完成{ok_n}次")
+        try:
+            after = self.progress_raw()
+            lines.append(
+                f"评论后进度 post={after['postCount']}/{after['createPostUpperLimit']} 本进程成功{ok_n}次"
+            )
+        except Exception:
+            lines.append(f"评论完成{ok_n}/{want}次")
         return lines
 
     def create_thread(self, n: int) -> List[str]:
-        lines = []
-        for i in range(max(n, 0)):
+        """发帖：先读今日 post 进度，满则停（与评论共用配额）。"""
+        if n <= 0:
+            return ["发帖关闭"]
+        lines: List[str] = []
+        done, upper, remain = self._post_remain(lines, "发帖/评论")
+        if remain <= 0:
+            lines.append("今日发帖/评论已满，自动停止")
+            return lines
+        want = min(n, remain)
+        lines.append(f"本轮最多再发帖 {want} 次")
+        ok_n = 0
+        for i in range(want):
+            if ok_n >= remain:
+                break
             text = self.hitokoto()
             title = text[:30]
             r = self.call(
@@ -464,22 +549,34 @@ class IqooApi:
                 body={
                     "title": title,
                     "content": {"text": text, "indexes": []},
-                    "categoryId": 21,  # 聊游戏
+                    "categoryId": 21,
                 },
             )
             data = r.get("Data") or {}
             ok = r.get("Code") == 0
             tid = data.get("threadId") if ok else None
+            msg = str(r.get("Message") or r.get("Code") or "")[:40]
             lines.append(
-                f"发帖{i + 1} {'OK #'+str(tid)+' '+str(data.get('categoryName')) if ok else str(r.get('Code'))+' '+str(r.get('Message'))[:40]} 「{title[:16]}」"
+                f"发帖{i + 1} {'OK #'+str(tid)+' '+str(data.get('categoryName')) if ok else msg} 「{title[:16]}」"
             )
             if not ok:
                 break
+            ok_n += 1
+            if ok_n >= remain:
+                lines.append(f"今日发帖/评论已满 {done + ok_n}/{upper}，停止")
+                break
             time.sleep(2)
+        try:
+            after = self.progress_raw()
+            lines.append(
+                f"发帖后进度 post={after['postCount']}/{after['createPostUpperLimit']} 本进程成功{ok_n}次"
+            )
+        except Exception:
+            lines.append(f"发帖完成{ok_n}次")
         return lines
 
     def draw(self, max_times: int) -> List[str]:
-        """只抽每日免费第一抽；当天已有中奖记录则跳过，防同日重复跑。"""
+        """抽奖：先查今日中奖记录 + 抽奖池，已有或次数不足则跳过。"""
         lines = []
         if max_times <= 0:
             return ["抽奖跳过"]
@@ -496,12 +593,16 @@ class IqooApi:
         d = self.call("GET", "v3/today.draw.count")
         cnt = int((d.get("Data") or {}).get("count") or 0)
         lines.append(f"抽奖池剩余={cnt}（只抽免费1次）")
+        # 免费抽不依赖池次数；仍记录日志便于观察
         r = self.call("POST", "v3/luck.draw", body={})
         if r.get("Code") == 0:
             data = r.get("Data") or {}
             lines.append(f"免费抽奖: {data.get('prize_name') or data.get('prize_id')}")
         else:
-            lines.append(f"免费抽奖失败: {r.get('Code')} {r.get('Message')}")
+            msg = str(r.get("Message") or "")
+            lines.append(f"免费抽奖: {r.get('Code')} {msg[:60]}")
+            if any(x in msg for x in ("已抽", "次数", "上限", "already", "limit")):
+                lines.append("抽奖已达上限/已抽过，不再重试")
         return lines
 
 
@@ -538,6 +639,18 @@ def run_account(
 
     score0 = api.score()
     lines.append(f"初始酷币={score0}")
+
+    # 任务前统一读一次今日进度，供各子任务防超做
+    try:
+        p0 = api.progress_raw()
+        lines.append(
+            f"今日进度预读 浏览{p0['viewCount']}/{p0['viewUpperLimit']} "
+            f"点赞{p0['likeCount']}/{p0['likeUpperLimit']} "
+            f"分享{p0['shareCount']}/{p0['shareUpperLimit']} "
+            f"发帖{p0['postCount']}/{p0['createPostUpperLimit']}"
+        )
+    except Exception as e:
+        lines.append(f"今日进度预读失败: {e}")
 
     lines.append(api.sign())
 
