@@ -565,9 +565,9 @@ def main() -> int:
     print(f"结果 {ok_n}/{len(lines)}")
     _report = "\n".join(lines)
     try:
-        from notify_report import send_ql_notify
+        from send_notify import send_notify
 
-        send_ql_notify(f"中国移动10086签到 {ok_n}/{len(lines)}", _report)
+        send_notify(f"中国移动10086签到 {ok_n}/{len(lines)}", _report)
     except Exception as _ne:
         print("[notify] 跳过:", _ne)
     return 0 if ok_n == len(lines) else 1

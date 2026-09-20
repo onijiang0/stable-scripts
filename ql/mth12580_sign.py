@@ -2,27 +2,31 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
-# @Description: 12580mth(大参林/ddwhcb) - smallcat openid 换业务登录态 + 每日签到
+# @Description: 12580mth(大参林/ddwhcb) - openid 换业务登录态 + 每日签到 + 抽奖
 # cron: 25 14 * * *
 # ------------------------------------------
 # 变量名：mth12580
 # 变量值：wx_server 里的 openid/账号标识，多账号用 & 或换行分隔（可加 #备注）
-# 示例：owNAX6hm...etI6o&owNAX6j2...LDPc#小号
 #
 # 依赖变量：
 # wx_server_url    必填，wx_server 地址（勿写进仓库）
 # wx_auth          必填，wx_server 鉴权值（/wx/code 用）
 # mth12580_appid   可选，默认 wx1d6ad6c2412dea5a
-# ------------------------------------------
+# mth12580_draw    可选，0=关抽奖；默认 1
+# 抽奖规则：仅当积分 >= 100 时抽奖 1 次；日志打印签到奖励
+#
 # 契约（appid wx1d6ad6c2412dea5a，host https://gateway.ddwhcb.com/）：
 # （自反编译主包；channelId=mth，routeFix=12580mth/api/wx，client=4）
 #
 # 响应壳：{code:int, msg, data}  code==0 成功；body 可能 AES 再包一层
 # 登录参数  POST smallcat /wx/code  json:{openid, appid} -> data.code
-# 业务登录  POST .../wechatMiniLogin  form: code=&token=&act=wechatMiniLogin&...
-#           -> data.token / data.uid / data.mobile
-# 签到状态  POST .../memberSignPage  form: token=&act=memberSignPage&...
-# 签到      POST .../memberSign      form: token=&act=memberSign&...
+# 业务登录  POST .../wechatMiniLogin -> data.token / data.uid
+# 签到状态  POST .../memberSignPage
+# 签到      POST .../memberSign
+# 抽奖页    POST .../lotteryPage
+# 抽奖信息  POST .../getMemberChoujiang*（抓包名截断，脚本多 act 探测）
+# 抽奖资格  POST .../qualifications
+# 抽奖      POST .../luckDraw  （body 仅 mth_str，无额外业务字段）
 #
 # 网关公共字段 + 签名：
 #   mth_noncestr / mth_timestamp / mth_act
@@ -126,7 +130,7 @@ class DclApi:
         payload["mth_sign"] = mth_sign(act, nonce, ts)
         payload["token"] = self.token
         payload["client"] = str(CLIENT)
-        payload["client_type"] = "windows"
+        payload["client_type"] = "android"
         payload["channel_id"] = CHANNEL
         payload["version"] = VERSION
         payload["act"] = act
@@ -242,32 +246,265 @@ def get_token(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> T
     return token, uid
 
 
+def _walk_find(obj: Any, keys: Tuple[str, ...]) -> Any:
+    if isinstance(obj, dict):
+        for k in keys:
+            if k in obj and obj[k] not in (None, ""):
+                return obj[k]
+        for v in obj.values():
+            got = _walk_find(v, keys)
+            if got not in (None, ""):
+                return got
+    elif isinstance(obj, list):
+        for it in obj:
+            got = _walk_find(it, keys)
+            if got not in (None, ""):
+                return got
+    return None
+
+
+def extract_sign_reward(res: Dict[str, Any]) -> str:
+    """从签到响应里提取奖励文案（积分/优惠券/礼品等）。"""
+    if not isinstance(res, dict):
+        return ""
+    data = res.get("data") if isinstance(res.get("data"), dict) else res
+    # 显式字段
+    for k in (
+        "rewardName", "prizeName", "awardName", "giftName", "couponName",
+        "signReward", "reward", "prize", "msg", "message",
+    ):
+        v = _walk_find(data, (k,))
+        if isinstance(v, str) and v.strip() and k != "msg":
+            return v.strip()
+    parts = []
+    gain = _walk_find(data, ("integral", "score", "point", "points", "gainIntegral", "addIntegral"))
+    try:
+        g = int(gain)
+        if g:
+            parts.append(f"积分+{g}")
+    except Exception:
+        pass
+    coupon = _walk_find(data, ("couponName", "coupon", "couponList"))
+    if isinstance(coupon, str) and coupon.strip():
+        parts.append(coupon.strip())
+    elif isinstance(coupon, dict):
+        nm = coupon.get("name") or coupon.get("couponName")
+        if nm:
+            parts.append(str(nm))
+    elif isinstance(coupon, list) and coupon:
+        names = []
+        for it in coupon[:3]:
+            if isinstance(it, dict):
+                names.append(str(it.get("name") or it.get("couponName") or "")[:20])
+            elif isinstance(it, str):
+                names.append(it[:20])
+        if any(names):
+            parts.append("、".join([n for n in names if n]))
+    msg = str(res.get("msg") or res.get("message") or "").strip()
+    if msg and not parts:
+        # msg 可能本身含奖励描述
+        if any(x in msg for x in ("积分", "优惠券", "券", "礼品", "红包", "+")):
+            parts.append(msg)
+    return " | ".join(parts)
+
+
+def extract_integral(*payloads: Any) -> Optional[int]:
+    """从多个响应中提取当前积分/成长值。"""
+    keys = (
+        "integral", "score", "point", "points", "totalIntegral",
+        "usableIntegral", "balance", "memberIntegral",
+    )
+    for obj in payloads:
+        got = _walk_find(obj, keys)
+        try:
+            if got is not None:
+                return int(float(got))
+        except Exception:
+            continue
+    return None
+
+
+def parse_draw_remain(obj: Any) -> Optional[int]:
+    """从抽奖接口响应里粗取剩余次数。"""
+    if not isinstance(obj, dict):
+        return None
+    keys = (
+        "remainNum", "remainCount", "leftCount", "leftTimes", "drawCount",
+        "times", "chance", "chances", "surplus", "surplusCount",
+        "lotteryCount", "drawNum", "canDrawNum", "remaining",
+    )
+    data = obj.get("data") if isinstance(obj.get("data"), dict) else obj
+    if not isinstance(data, dict):
+        return None
+    for k in keys:
+        v = data.get(k)
+        if isinstance(v, bool):
+            continue
+        try:
+            return int(v)
+        except Exception:
+            continue
+    # 嵌套
+    for v in data.values():
+        if isinstance(v, dict):
+            got = parse_draw_remain({"data": v})
+            if got is not None:
+                return got
+    return None
+
+
+def lottery_query(api: "DclApi") -> List[str]:
+    """只读探测抽奖相关 act，打印剩余次数与摘要。"""
+    lines: List[str] = []
+    acts = [
+        "lotteryPage",
+        "qualifications",
+        "getMemberChoujiangPage",
+        "getMemberChoujiangInfo",
+        "getMemberChoujiangConfig",
+        "getMemberChoujiang",
+        "memberChoujiang",
+        "index",
+    ]
+    remain = None
+    for act in acts:
+        try:
+            res = api.call(act)
+        except Exception as e:
+            continue
+        code = res.get("code")
+        msg = str(res.get("msg") or res.get("message") or "")[:40]
+        if code not in (0, "0", None) and not msg:
+            continue
+        got = parse_draw_remain(res)
+        if got is not None:
+            remain = got if remain is None else min(remain, got)
+        data = res.get("data")
+        preview = ""
+        if isinstance(data, dict):
+            preview = json.dumps(data, ensure_ascii=False)[:120]
+        elif data is not None:
+            preview = str(data)[:80]
+        if code in (0, "0") or got is not None or preview:
+            lines.append(f"查询 {act}: code={code} remain={got} {msg} {preview}")
+    if remain is None:
+        remain = -1  # 未知
+    lines.append(f"抽奖剩余: {remain if remain >= 0 else '未知'}")
+    return lines, remain
+
+
+def lottery_draw(api: "DclApi") -> List[str]:
+    """积分达标后只抽 1 次。"""
+    lines: List[str] = []
+    try:
+        res = api.call("luckDraw", {})
+    except Exception as e:
+        return [f"抽奖异常: {e}"]
+    code = res.get("code")
+    msg = str(res.get("msg") or res.get("message") or "")
+    data = res.get("data") if isinstance(res.get("data"), dict) else {}
+    prize = (
+        data.get("prizeName")
+        or data.get("prize_name")
+        or data.get("awardName")
+        or data.get("giftName")
+        or data.get("name")
+        or ""
+    )
+    if code in (0, "0"):
+        lines.append(f"抽奖1次 成功 奖品={prize or data.get('prizeId') or '-'} {msg}".strip())
+    else:
+        low = msg.lower()
+        if any(x in (msg + low) for x in ("已抽", "次数", "上限", "不足", "用完", "already", "limit")):
+            lines.append(f"抽奖跳过: {msg or code}")
+        else:
+            lines.append(f"抽奖失败 code={code} {msg[:80]}")
+    return lines
+
+
 def run_one(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> str:
     name = openid[-8:]
+    parts: List[str] = []
     try:
         token, uid = get_token(sm, openid, appid, cache)
         api = DclApi(token)
 
         page = api.call("memberSignPage")
         signed = False
+        page_data = {}
         if page.get("code") == 0:
-            pd = page.get("data") or {}
+            page_data = page.get("data") or {}
+            pd = page_data if isinstance(page_data, dict) else {}
             for k in ("is_sign", "sign_status", "signed", "isSign"):
                 if k in pd:
                     signed = bool(pd.get(k) in (1, True, "1", "已签"))
                     break
         if signed:
-            return f"✅ [{name}] 今日已签到 uid={uid}"
+            parts.append("✅ [{}] 今日已签到 uid={}".format(name, uid))
+        else:
+            res = api.call("memberSign")
+            msg = str(res.get("msg") or res.get("message") or "")
+            reward = extract_sign_reward(res)
+            if res.get("code") == 0:
+                line = "✅ [{}] 签到成功 uid={}".format(name, uid)
+                if reward:
+                    line += f" | 奖励: {reward}"
+                if msg and msg not in line:
+                    line += f" {msg}"
+                parts.append(line.strip())
+            elif any(x in msg for x in ALREADY):
+                line = "✅ [{}] {}".format(name, msg)
+                if reward:
+                    line += " | 奖励: {}".format(reward)
+                parts.append(line)
+            else:
+                parts.append("❌ [{}] code={} {}".format(name, res.get("code"), msg))
+            page_data = res if isinstance(res, dict) else page_data
 
-        res = api.call("memberSign")
-        msg = str(res.get("msg") or res.get("message") or "")
-        if res.get("code") == 0:
-            return f"✅ [{name}] 签到成功 uid={uid} {msg}".strip()
-        if any(x in msg for x in ALREADY):
-            return f"✅ [{name}] {msg}"
-        return f"❌ [{name}] code={res.get('code')} {msg}"
+        # 签到页里若带奖励/积分也打印
+        page_reward = extract_sign_reward(page) if not signed else ""
+        if page_reward and all("奖励:" not in p for p in parts):
+            parts.append("  签到页奖励: {}".format(page_reward))
+
+        # 积分：签到页 / 抽奖查询响应
+        q_preview = []
+        try:
+            q_lines, remain = lottery_query(api)
+            q_preview = q_lines
+        except Exception as e:
+            remain = -1
+            parts.append("  抽奖查询异常: {}".format(e))
+
+        integral = extract_integral(page, page_data)
+        for line in q_preview:
+            if integral is None and "integral" in line.lower():
+                integral = extract_integral({"data": line})
+        if integral is None:
+            try:
+                integral = extract_integral(api.call("memberSignPage"))
+            except Exception:
+                pass
+        parts.append("  积分: {}".format(integral if integral is not None else "?"))
+        parts.append("  抽奖剩余: {}".format(remain if remain is not None and remain >= 0 else "未知"))
+
+        # 抽奖：积分 >= 100 才抽，且只抽 1 次
+        if os.getenv("mth12580_draw", "1") in ("0", "false", "no"):
+            parts.append("  抽奖已关闭(mth12580_draw=0)")
+        elif integral is None:
+            parts.append("  积分未知，跳过抽奖（需积分>=100）")
+        elif integral < 100:
+            parts.append("  积分 {}<100，跳过抽奖".format(integral))
+        else:
+            parts.append("  积分 {}>=100，抽奖 1 次".format(integral))
+            try:
+                d_lines = lottery_draw(api)
+                parts.extend(["  {}".format(x) for x in d_lines])
+            except Exception as e:
+                parts.append("  抽奖异常: {}".format(e))
+
+        return "\n".join(parts)
     except Exception as e:
-        return f"❌ [{name}] 异常: {e}"
+        return "❌ [{}] 异常: {}".format(name, e)
 
 
 def main() -> int:
@@ -296,14 +533,14 @@ def main() -> int:
         time.sleep(3)
 
     print("\n" + "=" * 36)
-    print("      12580mth 签到简报")
+    print("      12580mth 签到+抽奖简报")
     print("=" * 36)
     _report = "\n".join(lines)
     print(_report)
     try:
-        from notify_report import send_ql_notify
+        from send_notify import send_notify
 
-        send_ql_notify("12580mth签到简报", _report)
+        send_notify("12580mth签到+抽奖简报", _report)
     except Exception as _ne:
         print("[notify] 跳过:", _ne)
     return 0

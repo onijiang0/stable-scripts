@@ -22,7 +22,7 @@
 
 ### 推送（sendNotify）
 
-`ql/` 下脚本在结束时会调用 `notify_report.py`（位于 `wxapp/`），或 `oppo_sign.js` 通过 `../tools/env.js` → `tools/sendNotify.js` 推送简报。
+`ql/` 下脚本在结束时会调用 `send_notify.py`（位于 `wxapp/`），内部优先执行 `../tools/sendNotify.js`；`oppo_sign.js` 通过 `../tools/env.js` → `tools/sendNotify.js` 推送简报。
 
 | 环境变量 | 说明 |
 |---|---|
@@ -41,6 +41,8 @@
 | `xboxjlb_sign.py` | Xbox 俱乐部·有赞小程序签到 | `xboxjlb` | `40 14 * * *` |
 | `cmcc_sign.py` | 中国移动 10086 签到（小程序 SSO 全链路 `login` → `wmhsso` → `wmhToken` → `mark`） | `cmcc` | `30 14 * * *` |
 | `oppo_sign.js` | OPPO 小程序会员查询 / 积分签到 / 做任务赚积分 | `oppo` | `21 8 * * *` |
+| `xxy_sign.py` | 芯享会（心相印）code 登录 + 每日签到（hengan 后端） | `xxy` | `35 14 * * *` |
+| `send_notify.py` | Python 侧推送封装，调用 `tools/sendNotify.js` | — | — |
 
 > 10086 签到原先有三份并行实现（`cmcc_sign.js` / `cmcc_sign.py` / `cmcc_sign_oauth.js`），
 > 变量名同为 `cmcc`，同账号重复启用会互相干扰。已于 2026-09-19 统一为 `cmcc_sign.py`，

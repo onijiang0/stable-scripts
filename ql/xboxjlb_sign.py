@@ -375,9 +375,9 @@ def main() -> int:
     _report = "\n".join(all_lines)
     print(_report)
     try:
-        from notify_report import send_ql_notify
+        from send_notify import send_notify
 
-        send_ql_notify("Xbox俱乐部签到简报", _report)
+        send_notify("Xbox俱乐部签到简报", _report)
     except Exception as _ne:
         print("[notify] 跳过:", _ne)
     return 0
