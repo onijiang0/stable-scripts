@@ -14,7 +14,7 @@
 # wx_server_url     必填，wx_server 地址（勿写进仓库）
 # iqoo_appid        默认 wxcf4266fbc9463132
 # iqoo_browse       脚本内默认 0（已关闭浏览任务）；环境变量可覆盖，但默认不浏览
-# iqoo_like         默认 4，点赞次数（不跳过已赞帖，服务端自行判定）
+# iqoo_like         默认 4（单日硬顶）；任务前读今日进度，已满则不再点赞
 # iqoo_share        默认 4，分享次数
 # iqoo_comment      默认 1，评论次数（内容来自一言，去掉来源后缀）
 # iqoo_draw         默认 1=只抽每日免费第一抽（当天已中奖则跳过）；0=不抽
@@ -228,14 +228,29 @@ class IqooApi:
             return msg or "今日已签到"
         return f"签到失败 Code={d.get('Code')} {msg}"
 
-    def progress(self) -> dict:
+    def progress_raw(self) -> dict:
+        """今日任务进度原始数值，用于点赞/分享防超做。"""
         d = self.call("GET", "v5/users/tasks/today-progress")
         data = d.get("Data") or {}
         return {
-            "view": f"{data.get('viewCount')}/{data.get('viewUpperLimit')}",
-            "like": f"{data.get('likeCount')}/{data.get('likeUpperLimit')}",
-            "share": f"{data.get('shareCount')}/{data.get('shareUpperLimit')}",
-            "post": f"{data.get('postCount')}/{data.get('createPostUpperLimit')}",
+            "likeCount": int(data.get("likeCount") or 0),
+            "likeUpperLimit": int(data.get("likeUpperLimit") or 4),
+            "shareCount": int(data.get("shareCount") or 0),
+            "shareUpperLimit": int(data.get("shareUpperLimit") or 4),
+            "viewCount": int(data.get("viewCount") or 0),
+            "viewUpperLimit": int(data.get("viewUpperLimit") or 0),
+            "postCount": int(data.get("postCount") or 0),
+            "createPostUpperLimit": int(data.get("createPostUpperLimit") or 0),
+            "dailyScore": data.get("dailyScore"),
+        }
+
+    def progress(self) -> dict:
+        data = self.progress_raw()
+        return {
+            "view": f"{data['viewCount']}/{data['viewUpperLimit']}",
+            "like": f"{data['likeCount']}/{data['likeUpperLimit']}",
+            "share": f"{data['shareCount']}/{data['shareUpperLimit']}",
+            "post": f"{data['postCount']}/{data['createPostUpperLimit']}",
             "dailyScore": data.get("dailyScore"),
         }
 
@@ -335,12 +350,39 @@ class IqooApi:
         return lines
 
     def like(self, threads: List[dict], n: int) -> List[str]:
-        """点赞：不跳过已赞帖，统一发起 posts.update，结果以服务端为准。"""
+        """点赞：任务前先读今日进度；达到上限(默认4)自动停止，防重复执行超赞。
+
+        - 不跳过已赞帖，统一发起 posts.update
+        - 以服务端 likeCount/likeUpperLimit 为准，剩余多少赞多少
+        - 本进程成功满 4 次（或上限）即停
+        """
         lines = []
         if n <= 0:
             return ["点赞关闭"]
+
+        HARD_CAP = 4  # 单日硬顶，防止多开脚本继续加赞
+        try:
+            prog = self.progress_raw()
+        except Exception as e:
+            prog = {"likeCount": 0, "likeUpperLimit": HARD_CAP}
+            lines.append(f"读取今日进度失败: {e}")
+
+        done_today = prog.get("likeCount", 0)
+        upper = int(prog.get("likeUpperLimit") or HARD_CAP)
+        upper = min(upper, HARD_CAP)
+        remain = max(0, upper - done_today)
+        lines.append(f"今日已赞 {done_today}/{upper}（脚本硬顶{HARD_CAP}）")
+        if remain <= 0:
+            lines.append("今日点赞已满，自动停止")
+            return lines
+
+        want = min(n, remain)
+        lines.append(f"本轮最多再赞 {want} 次")
         ok_n = 0
-        for t in threads[:n]:
+        for t in threads[:want]:
+            if ok_n >= remain or ok_n >= HARD_CAP:
+                lines.append(f"已达上限 {upper}，停止点赞")
+                break
             tid = t.get("id") or t.get("threadId")
             pid = t.get("postId") or t.get("pid")
             body: Dict[str, Any] = {"id": tid, "data": {"attributes": {"isLiked": True}}}
@@ -348,15 +390,24 @@ class IqooApi:
                 body["postId"] = pid
             r = self.call("POST", "v3/posts.update", body=body)
             ok = r.get("Code") == 0
-            extra = ""
-            if t.get("isLiked"):
-                extra = "(原本已赞)"
+            extra = "(原本已赞)" if t.get("isLiked") else ""
             msg = str(r.get("Message") or r.get("Code") or "")[:40]
             lines.append(f"点赞#{tid} {'OK' if ok else msg}{extra}")
             if ok:
                 ok_n += 1
+                if ok_n >= remain:
+                    lines.append(f"已赞满 {done_today + ok_n}/{upper}，自动停止")
+                    break
             time.sleep(0.8)
-        lines.append(f"点赞完成{ok_n}/{min(n, len(threads))}次")
+
+        # 再核一次服务端进度
+        try:
+            after = self.progress_raw()
+            lines.append(
+                f"点赞后进度 {after['likeCount']}/{after['likeUpperLimit']} 本进程成功{ok_n}次"
+            )
+        except Exception:
+            lines.append(f"点赞完成{ok_n}/{want}次")
         return lines
 
     def share(self, threads: List[dict], n: int) -> List[str]:
