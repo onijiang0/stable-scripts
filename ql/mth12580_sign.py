@@ -422,9 +422,18 @@ def lottery_draw(api: "DclApi") -> List[str]:
     return lines
 
 
-def run_one(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> str:
+def run_one(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> Dict[str, Any]:
     name = openid[-8:]
-    parts: List[str] = []
+    acc: Dict[str, Any] = {
+        "account": name,
+        "phone": "",
+        "status": "-",
+        "reward": "-",
+        "extra": [],
+        "error": "",
+        "success": False,
+    }
+    extras: List[str] = []
     try:
         token, uid = get_token(sm, openid, appid, cache)
         api = DclApi(token)
@@ -440,40 +449,40 @@ def run_one(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> str
                     signed = bool(pd.get(k) in (1, True, "1", "已签"))
                     break
         if signed:
-            parts.append("✅ [{}] 今日已签到 uid={}".format(name, uid))
+            acc["status"] = "今日已签到 ✅"
+            acc["success"] = True
+            extras.append(f"uid={uid}")
         else:
             res = api.call("memberSign")
             msg = str(res.get("msg") or res.get("message") or "")
             reward = extract_sign_reward(res)
             if res.get("code") == 0:
-                line = "✅ [{}] 签到成功 uid={}".format(name, uid)
-                if reward:
-                    line += f" | 奖励: {reward}"
-                if msg and msg not in line:
-                    line += f" {msg}"
-                parts.append(line.strip())
+                acc["status"] = "签到成功 ✅"
+                acc["success"] = True
             elif any(x in msg for x in ALREADY):
-                line = "✅ [{}] {}".format(name, msg)
-                if reward:
-                    line += " | 奖励: {}".format(reward)
-                parts.append(line)
+                acc["status"] = f"{msg} ✅"
+                acc["success"] = True
             else:
-                parts.append("❌ [{}] code={} {}".format(name, res.get("code"), msg))
+                acc["status"] = f"code={res.get('code')} {msg} ❌"
+                acc["error"] = msg[:80]
+            if reward:
+                acc["reward"] = reward
+            extras.append(f"uid={uid}")
+            if msg and msg not in acc["status"]:
+                extras.append(msg[:60])
             page_data = res if isinstance(res, dict) else page_data
 
-        # 签到页里若带奖励/积分也打印
         page_reward = extract_sign_reward(page) if not signed else ""
-        if page_reward and all("奖励:" not in p for p in parts):
-            parts.append("  签到页奖励: {}".format(page_reward))
+        if page_reward and acc.get("reward") in ("-", "", None):
+            acc["reward"] = page_reward
 
-        # 积分：签到页 / 抽奖查询响应
         q_preview = []
         try:
             q_lines, remain = lottery_query(api)
             q_preview = q_lines
         except Exception as e:
             remain = -1
-            parts.append("  抽奖查询异常: {}".format(e))
+            extras.append(f"抽奖查询异常: {e}")
 
         integral = extract_integral(page, page_data)
         for line in q_preview:
@@ -484,30 +493,35 @@ def run_one(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> str
                 integral = extract_integral(api.call("memberSignPage"))
             except Exception:
                 pass
-        parts.append("  积分: {}".format(integral if integral is not None else "?"))
-        parts.append("  抽奖剩余: {}".format(remain if remain is not None and remain >= 0 else "未知"))
+        if integral is not None:
+            extras.append(f"积分 {integral}")
+        extras.append(f"抽奖剩余 {remain if remain is not None and remain >= 0 else '未知'}")
 
-        # 抽奖：积分 >= 100 才抽，且只抽 1 次
         if os.getenv("mth12580_draw", "1") in ("0", "false", "no"):
-            parts.append("  抽奖已关闭(mth12580_draw=0)")
+            extras.append("抽奖已关闭")
         elif integral is None:
-            parts.append("  积分未知，跳过抽奖（需积分>=100）")
+            extras.append("积分未知，跳过抽奖")
         elif integral < 100:
-            parts.append("  积分 {}<100，跳过抽奖".format(integral))
+            extras.append(f"积分 {integral}<100，跳过抽奖")
         else:
-            parts.append("  积分 {}>=100，抽奖 1 次".format(integral))
+            extras.append(f"积分 {integral}>=100，抽奖 1 次")
             try:
                 d_lines = lottery_draw(api)
-                parts.extend(["  {}".format(x) for x in d_lines])
+                extras.extend([str(x) for x in d_lines if x][:4])
             except Exception as e:
-                parts.append("  抽奖异常: {}".format(e))
+                extras.append(f"抽奖异常: {e}")
 
-        return "\n".join(parts)
+        acc["extra"] = extras
+        return acc
     except Exception as e:
-        return "❌ [{}] 异常: {}".format(name, e)
+        acc["status"] = f"异常 ❌ ({str(e)[:60]})"
+        acc["error"] = str(e)[:80]
+        acc["extra"] = extras
+        return acc
 
 
 def main() -> int:
+    started = time.time()
     auth = os.getenv("wx_auth", "").strip()
     base = os.getenv("wx_server_url", "").strip()
     openids_raw = os.getenv("mth12580", "").strip()
@@ -525,24 +539,36 @@ def main() -> int:
 
     sm = Smallcat(base, auth)
     cache = load_cache()
-    lines = []
+    accounts: List[Dict[str, Any]] = []
     for oid in split_openids(openids_raw):
-        line = run_one(sm, oid, appid, cache)
-        log.info(line)
-        lines.append(line)
+        acc = run_one(sm, oid, appid, cache)
+        accounts.append(acc)
         time.sleep(3)
 
-    print("\n" + "=" * 36)
-    print("      12580mth 签到+抽奖简报")
-    print("=" * 36)
-    _report = "\n".join(lines)
-    print(_report)
+    ok_n = sum(1 for a in accounts if a.get("success"))
     try:
-        from send_notify import send_notify
+        from send_notify import notify_and_format
 
-        send_notify("12580mth签到+抽奖简报", _report)
+        notify_and_format(
+            "12580mth",
+            accounts,
+            title=f"12580mth签到 {ok_n}/{len(accounts)}",
+            start_ts=started,
+        )
     except Exception as _ne:
-        print("[notify] 跳过:", _ne)
+        print("[notify] 使用旧格式:", _ne)
+        lines = [
+            f"{'✅' if a.get('success') else '❌'} [{a.get('account')}] {a.get('status')} {a.get('reward')}"
+            for a in accounts
+        ]
+        _report = "\n".join(lines)
+        print(_report)
+        try:
+            from send_notify import send_notify
+
+            send_notify("12580mth签到+抽奖简报", _report)
+        except Exception as _ne2:
+            print("[notify] 跳过:", _ne2)
     return 0
 
 

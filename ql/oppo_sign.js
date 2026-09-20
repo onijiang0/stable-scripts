@@ -77,10 +77,49 @@ function splitAccounts(value = "") {
         .filter(Boolean);
 }
 
+function maskPhone(phone) {
+    const digits = String(phone || "").replace(/\D/g, "");
+    if (digits.length >= 11) return `${digits.slice(0, 3)}****${digits.slice(-4)}`;
+    return phone || "-";
+}
+
 function short(value, max = 400) {
     if (value === undefined || value === null) return "";
     const text = typeof value === "string" ? value : JSON.stringify(value);
     return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function isNoisyLine(s) {
+    const t = String(s || "");
+    if (/^\s*[\{\[]/.test(t) && t.length > 60) return true;
+    if (/"result-status"|"month"\s*:|"encryptData"|"sessionKey"/i.test(t)) return true;
+    return t.length > 220 && /ok\s*[:：]/i.test(t);
+}
+
+function formatAccountBlock(acc) {
+    const phone = acc.phone ? ` (${maskPhone(acc.phone)})` : "";
+    const lines = [
+        "------------------------------",
+        `👤 账号信息：${acc.account || "未知账号"}${phone}`,
+        `📝 签到状态：${acc.status || "-"}`,
+    ];
+    if (acc.reward && acc.reward !== "-") lines.push(`🎁 本次收益：${acc.reward}`);
+    if (acc.monthDays !== undefined && acc.monthDays !== null && acc.monthDays !== "") {
+        lines.push(`📅 累计数据：本月已签 ${acc.monthDays} 天`);
+    }
+    const extras = (acc.extra || []).filter((x) => x && !isNoisyLine(x)).slice(0, 6);
+    if (extras.length) {
+        lines.push("📌 补充信息：");
+        extras.forEach((e) => lines.push(`   ${e}`));
+    }
+    return lines;
+}
+
+function formatReport(task, accounts) {
+    const lines = ["==============================", `🛒 任务名称：${task}`];
+    (accounts || []).forEach((acc) => lines.push(...formatAccountBlock(acc)));
+    lines.push("==============================");
+    return lines.join("\n");
 }
 
 function parseAccount(raw = "") {
@@ -168,10 +207,22 @@ class OppoTask {
         this.creditsAddActionId = CREDITS_ADD_ACTION_ID;
         this.taskActivityId = "";
         this.pointBefore = 0;
+        this.report = {
+            account: this.account.remark || `账号${index}`,
+            phone: "",
+            status: "-",
+            reward: "-",
+            monthDays: null,
+            extra: [],
+        };
     }
 
     log(message) {
-        $.log(`账号[${this.index}]${this.account.remark ? `[${this.account.remark}]` : ""} ${message}`);
+        const msg = String(message || "");
+        if (isNoisyLine(msg)) return;
+        this.report.extra.push(msg.slice(0, 80));
+        if (this.report.extra.length > 12) this.report.extra = this.report.extra.slice(-12);
+        $.log(`账号[${this.index}]${this.account.remark ? `[${this.account.remark}]` : ""} ${msg}`);
     }
 
     sessionHeaders() {
@@ -272,11 +323,11 @@ class OppoTask {
         this.memberInfo = member.data || {};
         this.baseInfo = base.data || {};
         const userName = this.memberInfo.userName || this.baseInfo.userName || "未知";
-        const phone = this.baseInfo.pnumber ? `，手机号: ${this.baseInfo.pnumber}` : "";
+        const phone = this.baseInfo.pnumber || this.memberInfo.pnumber || "";
+        this.report.account = userName;
+        this.report.phone = phone;
         this.log(
-            `用户信息: ${userName}${phone}，积分: ${this.memberInfo.pointAmount ?? 0}，成长值: ${
-                this.memberInfo.growthValue ?? 0
-            }，等级: ${this.memberInfo.gradeCode || "未知"}`
+            `用户信息: ${userName}${phone ? ` ${maskPhone(phone)}` : ""}，积分: ${this.memberInfo.pointAmount ?? 0}`
         );
     }
 
@@ -284,6 +335,7 @@ class OppoTask {
         const result = await this.miniRequest("GET", "/activity/signIn/entrance", { sessionId: this.sessionId });
         const data = result.data || {};
         this.log(`签到入口: ${data.signInIsStarted ? "已开启" : "未开启"}，连续/累计天数: ${data.signInDays ?? "-"}`);
+        if (data.signInDays != null) this.report.monthDays = data.signInDays;
     }
 
     async discoverSignActivity() {
@@ -351,17 +403,18 @@ class OppoTask {
         const detail = await this.getSignDetail();
         const award = this.todayAward(detail);
         const signed = Number(award.status) === 1;
-        this.log(
-            `签到详情: ${signed ? "今日已签" : "今日未签"}，已签天数: ${detail.signInDayNum ?? 0}，今日奖励: ${
-                award.awardValue ?? "-"
-            }${award.awardType !== undefined ? awardTypeName(award.awardType) : ""}`
-        );
+        const days = detail.signInDayNum ?? 0;
+        this.report.monthDays = days;
+        this.log(`签到详情: ${signed ? "今日已签" : "今日未签"}，已签天数: ${days}`);
         return { detail, signed };
     }
 
     async signIn() {
         const { signed } = await this.querySignDetail();
-        if (signed) return this.log("签到结果: 今日已签到，跳过");
+        if (signed) {
+            this.report.status = "今日已签到 ✅";
+            return this.log("签到结果: 今日已签到，跳过");
+        }
         const result = await this.h5Request("POST", "/api/cn/oapi/marketing/cumulativeSignIn/signIn", {
             activityId: this.signActivityId,
             captchaCode: "",
@@ -370,9 +423,12 @@ class OppoTask {
         });
         const data = result.data || {};
         if (data.receiveStatus === false) {
-            this.log(`签到结果: 失败，${data.receiveFailMsg || result.message || "未知原因"}`);
+            const failMsg = data.receiveFailMsg || result.message || "未知原因";
+            this.report.status = `签到失败 ❌ (${String(failMsg).slice(0, 40)})`;
+            this.log(`签到结果: 失败，${failMsg}`);
             return;
         }
+        this.report.status = "签到成功 ✅";
         this.log(`签到结果: 成功，获得 ${data.awardValue ?? "-"}${awardTypeName(data.awardType)}`);
         await this.querySignDetail();
     }
@@ -499,6 +555,7 @@ class OppoTask {
     }
 
     async run() {
+        const started = Date.now();
         try {
             this.log(`开始执行 ${APP.name}`);
             await this.login();
@@ -510,27 +567,43 @@ class OppoTask {
             await this.doTasks();
             await this.queryMember();
             const after = Number(this.memberInfo.pointAmount || 0);
-            this.log(`积分变化: ${this.pointBefore} -> ${after} (${after - this.pointBefore >= 0 ? "+" : ""}${after - this.pointBefore})`);
+            const delta = after - this.pointBefore;
+            this.report.reward = `${delta >= 0 ? "+" : ""}${delta}`;
+            this.log(`积分变化: ${this.pointBefore} -> ${after} (${delta >= 0 ? "+" : ""}${delta})`);
+            if (!this.report.status || this.report.status === "-") {
+                this.report.status = this.report.reward === "+0" ? "任务已完成 ✅" : "执行完成 ✅";
+            }
         } catch (e) {
+            this.report.status = `执行失败 ❌ (${String(e.message || e).slice(0, 40)})`;
             this.log(`执行失败: ${e.message || e}`);
         }
+        this.report.costMs = Date.now() - started;
+        return this.report;
     }
 }
 
 async function main() {
+    const started = Date.now();
     $.checkEnv(CK_NAME);
     if (!$.userCount) {
         $.log(`未找到变量 ${CK_NAME}`);
         await $.done("OPPO 未配置账号");
         return;
     }
+    const reports = [];
     for (let i = 0; i < $.userList.length; i++) {
         const task = new OppoTask($.userList[i], i + 1);
-        await task.run();
+        const rep = await task.run();
+        reports.push(rep);
         if (i < $.userList.length - 1) await $.wait(1500, 3000);
     }
-    // tools/env.js.done() 会调用 ../tools/sendNotify.js
-    await $.done("OPPO会员签到简报");
+    const cost = Math.round((Date.now() - started) / 1000);
+    const report = formatReport("OPPO会员签到", reports);
+    $.log(report);
+    // env.js.done 会调用 sendNotify；正文用统一模板
+    await $.done(`OPPO会员签到 ${reports.filter((r) => String(r.status).includes("✅")).length}/${reports.length}\n${report}`);
+    $.log(`⏱️ 执行耗时：${cost} 秒`);
+    $.log("==============================");
 }
 
 main()

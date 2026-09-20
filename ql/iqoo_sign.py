@@ -629,90 +629,109 @@ def run_account(
     comment_n: int,
     draw_n: int,
     post_n: int,
-) -> List[str]:
-    lines = [f"—— 账号{idx} {openid[:12]}... ——"]
+) -> Dict[str, Any]:
+    extras: List[str] = [f"openid {openid[:12]}…"]
+    acc: Dict[str, Any] = {
+        "account": f"账号{idx}",
+        "phone": "",
+        "status": "-",
+        "reward": "-",
+        "extra": extras,
+        "error": "",
+        "success": False,
+    }
     api = IqooApi(appid)
     ok, msg = api.login(sc, auth, openid)
-    lines.append(("登录OK " + msg) if ok else ("登录失败 " + msg))
     if not ok:
-        return lines
+        acc["status"] = f"登录失败 ❌ ({str(msg)[:50]})"
+        acc["error"] = str(msg)[:80]
+        return acc
+    extras.append(f"登录 {msg}" if msg else "登录 OK")
 
     score0 = api.score()
-    lines.append(f"初始酷币={score0}")
+    extras.append(f"初始酷币={score0}")
 
-    # 任务前统一读一次今日进度，供各子任务防超做
     try:
         p0 = api.progress_raw()
-        lines.append(
-            f"今日进度预读 浏览{p0['viewCount']}/{p0['viewUpperLimit']} "
+        extras.append(
+            f"进度预读 浏览{p0['viewCount']}/{p0['viewUpperLimit']} "
             f"点赞{p0['likeCount']}/{p0['likeUpperLimit']} "
             f"分享{p0['shareCount']}/{p0['shareUpperLimit']} "
             f"发帖{p0['postCount']}/{p0['createPostUpperLimit']}"
         )
     except Exception as e:
-        lines.append(f"今日进度预读失败: {e}")
+        extras.append(f"进度预读失败: {e}")
 
-    lines.append(api.sign())
+    sign_line = str(api.sign() or "")
+    if any(x in sign_line for x in ("已签", "成功")):
+        acc["status"] = f"{sign_line[:40]} ✅"
+        acc["success"] = True
+    elif "失败" in sign_line or "❌" in sign_line:
+        acc["status"] = f"{sign_line[:40]} ❌"
+        acc["error"] = sign_line[:80]
+    else:
+        acc["status"] = sign_line[:40] or "签到结果未知"
+        acc["success"] = True
+    extras.append(sign_line[:80])
 
     need = max(like_n, share_n, comment_n, 2)
     threads = api.list_threads(need)
-    lines.append(f"候选帖{len(threads)}篇")
+    extras.append(f"候选帖{len(threads)}篇")
 
-    # 浏览任务默认在脚本内关闭（browse_n=0）；仅当明确 >0 时执行
     if browse_n > 0:
-        browse_src = api.browse_pool(max(browse_n, 4))
-        lines.append(f"浏览池{len(browse_src)}篇")
         try:
-            lines.extend(api.browse(browse_src, browse_n))
+            browse_src = api.browse_pool(max(browse_n, 4))
+            extras.extend([str(x)[:60] for x in api.browse(browse_src, browse_n)][:3])
         except Exception as e:
-            lines.append(f"浏览异常 {e}")
+            extras.append(f"浏览异常 {e}")
     else:
-        lines.append("浏览任务已关闭(脚本内 iqoo_browse=0)")
+        extras.append("浏览任务关闭")
 
     if like_n > 0:
         try:
-            lines.extend(api.like(threads, like_n))
+            extras.extend([str(x)[:60] for x in api.like(threads, like_n)][:3])
         except Exception as e:
-            lines.append(f"点赞异常 {e}")
-    else:
-        lines.append("点赞关闭")
+            extras.append(f"点赞异常 {e}")
     try:
-        lines.extend(api.share(threads, share_n))
+        extras.extend([str(x)[:60] for x in api.share(threads, share_n)][:3])
     except Exception as e:
-        lines.append(f"分享异常 {e}")
+        extras.append(f"分享异常 {e}")
     try:
         if comment_n > 0:
-            lines.extend(api.comment(threads, comment_n))
+            extras.extend([str(x)[:60] for x in api.comment(threads, comment_n)][:3])
     except Exception as e:
-        lines.append(f"评论异常 {e}")
+        extras.append(f"评论异常 {e}")
     try:
         if post_n > 0:
-            lines.extend(api.create_thread(post_n))
+            extras.extend([str(x)[:60] for x in api.create_thread(post_n)][:2])
     except Exception as e:
-        lines.append(f"发帖异常 {e}")
+        extras.append(f"发帖异常 {e}")
+    try:
+        extras.extend([str(x)[:60] for x in api.draw(draw_n)][:2])
+    except Exception as e:
+        extras.append(f"抽奖异常 {e}")
 
     try:
-        lines.extend(api.draw(draw_n))
-    except Exception as e:
-        lines.append(f"抽奖异常 {e}")
-
-    p = api.progress()
-    lines.append(
-        f"今日进度 浏览{p['view']} 点赞{p['like']} 分享{p['share']} 评论{p['post']} 今日分{p['dailyScore']}"
-    )
+        p = api.progress()
+        extras.append(
+            f"今日进度 浏览{p['view']} 点赞{p['like']} 分享{p['share']} 评论{p['post']} 今日分{p['dailyScore']}"
+        )
+    except Exception:
+        pass
     score1 = api.score()
     delta = score1 - score0
     sign = "+" if delta >= 0 else ""
-    lines.append(f"酷币 {score0} -> {score1}（{sign}{delta}）")
-    return lines
+    acc["reward"] = f"{sign}{delta}"
+    extras.append(f"酷币 {score0} → {score1}")
+    return acc
 
 
 def main() -> int:
+    started = time.time()
     raw = os.getenv("iqoo", "").strip()
     auth = os.getenv("wx_auth", "").strip()
     sc = os.getenv("wx_server_url", "").strip()
     appid = os.getenv("iqoo_appid", "wxcf4266fbc9463132").strip()
-    # 脚本内默认关闭浏览；如需开启请设 iqoo_browse>0
     browse_n = int(os.getenv("iqoo_browse", "0") or "0")
     like_n = int(os.getenv("iqoo_like", "4") or "4")
     share_n = int(os.getenv("iqoo_share", "4") or "4")
@@ -735,25 +754,38 @@ def main() -> int:
         log.error("iqoo 未解析出 openid")
         return 1
 
-    all_lines: List[str] = []
+    accounts: List[Dict[str, Any]] = []
     for i, oid in enumerate(openids, 1):
-        all_lines.extend(
+        accounts.append(
             run_account(i, oid, sc, auth, appid, browse_n, like_n, share_n, comment_n, draw_n, post_n)
         )
         if i < len(openids):
             time.sleep(3)
 
-    print("\n" + "=" * 36)
-    print("      iQOO社区任务简报")
-    print("=" * 36)
-    _report = "\n".join(all_lines)
-    print(_report)
+    ok_n = sum(1 for a in accounts if a.get("success"))
     try:
-        from send_notify import send_notify
+        from send_notify import notify_and_format
 
-        send_notify("iQOO社区任务简报", _report)
+        notify_and_format(
+            "iQOO社区",
+            accounts,
+            title=f"iQOO社区任务 {ok_n}/{len(accounts)}",
+            start_ts=started,
+        )
     except Exception as _ne:
-        print("[notify] 跳过:", _ne)
+        print("[notify] 使用旧格式:", _ne)
+        _report = "\n".join(
+            f"{'✅' if a.get('success') else '❌'} [{a.get('account')}] {a.get('status')} "
+            f"收益={a.get('reward')}"
+            for a in accounts
+        )
+        print(_report)
+        try:
+            from send_notify import send_notify
+
+            send_notify("iQOO社区任务简报", _report)
+        except Exception as _ne2:
+            print("[notify] 跳过:", _ne2)
     return 0
 
 

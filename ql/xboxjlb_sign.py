@@ -301,47 +301,65 @@ def run_account(
     kdt: str,
     cid: str,
     uuid: str,
-) -> List[str]:
-    lines: List[str] = [f"—— 账号{idx} {openid[:12]}... ——"]
+) -> Dict[str, Any]:
+    acc: Dict[str, Any] = {
+        "account": f"账号{idx}",
+        "phone": "",
+        "status": "-",
+        "reward": "-",
+        "month_days": None,
+        "extra": [],
+        "error": "",
+        "success": False,
+    }
+    extras: List[str] = [f"openid {openid[:12]}…"]
     try:
         code = get_wx_code(openid, appid)
-        lines.append("获取code OK")
         auth = youzan_auth(code, appid, kdt, uuid)
         mobile = auth.get("mobile") or ""
-        masked = (mobile[:3] + "****" + mobile[-4:]) if mobile else "未知"
-        lines.append(f"登录成功 userId={auth.get('userId')} 手机: {masked}")
+        acc["phone"] = mobile
+        if auth.get("userId"):
+            extras.append(f"userId={auth.get('userId')}")
 
         api = YzWeappCheckin(auth["accessToken"], auth["sessionId"], appid, kdt, cid, uuid)
         act = api.activity()
         signed = bool(act.get("isCheckin"))
         opened = bool(act.get("isOpen"))
-        cont = act.get("continuesDay", "?")
+        cont = act.get("continuesDay")
         daily = ""
         for r in act.get("dailyRewards") or []:
             daily = r.get("desc") or daily
-        lines.append(f"活动开启={opened} 已签={signed} 连签={cont} {daily}".strip())
+        if daily:
+            extras.append(daily)
+        if cont is not None:
+            extras.append(f"连签 {cont}")
 
         if signed:
-            lines.append("今日已签到，跳过提交")
+            acc["status"] = "今日已签到 ✅"
+            acc["success"] = True
         elif not opened:
-            lines.append("签到活动未开启")
+            acc["status"] = "签到活动未开启 ❌"
+            acc["error"] = "活动未开启"
         else:
             ok, msg = api.do_checkin()
-            lines.append(msg)
-            try:
-                act2 = api.activity()
-                lines.append("复核 isCheckin=" + str(act2.get("isCheckin")))
-            except Exception:
-                pass
+            acc["status"] = (msg or "签到成功") + (" ✅" if ok else " ❌")
+            acc["success"] = bool(ok)
+            if not ok:
+                acc["error"] = msg
 
         days = api.month_days()
-        lines.append("本月已签 " + str(len(days)) + " 天")
+        acc["month_days"] = len(days)
+        acc["extra"] = extras
+        return acc
     except Exception as e:
-        lines.append(f"失败: {e}")
-    return lines
+        acc["status"] = f"失败 ❌ ({str(e)[:60]})"
+        acc["error"] = str(e)[:80]
+        acc["extra"] = extras
+        return acc
 
 
 def main() -> int:
+    started = time.time()
     raw = os.getenv("xboxjlb", "").strip()
     appid = os.getenv("xboxjlb_appid", "wx7f4f694622875202").strip()
     kdt = os.getenv("xboxjlb_kdt", "100464643").strip()
@@ -363,23 +381,34 @@ def main() -> int:
         log.error("xboxjlb 未解析出有效 openid")
         return 1
 
-    all_lines: List[str] = []
+    accounts: List[Dict[str, Any]] = []
     for i, oid in enumerate(openids, 1):
-        all_lines.extend(run_account(i, oid, appid, kdt, cid, uuid))
+        accounts.append(run_account(i, oid, appid, kdt, cid, uuid))
         if i < len(openids):
             time.sleep(3)
 
-    print("\n" + "=" * 36)
-    print("   Xbox俱乐部签到简报(小程序)")
-    print("=" * 36)
-    _report = "\n".join(all_lines)
-    print(_report)
+    ok_n = sum(1 for a in accounts if a.get("success"))
     try:
-        from send_notify import send_notify
+        from send_notify import notify_and_format
 
-        send_notify("Xbox俱乐部签到简报", _report)
+        notify_and_format(
+            "Xbox俱乐部",
+            accounts,
+            title=f"Xbox俱乐部签到 {ok_n}/{len(accounts)}",
+            start_ts=started,
+        )
     except Exception as _ne:
-        print("[notify] 跳过:", _ne)
+        print("[notify] 使用旧格式:", _ne)
+        _report = "\n".join(
+            f"{'✅' if a.get('success') else '❌'} [{a.get('account')}] {a.get('status')}" for a in accounts
+        )
+        print(_report)
+        try:
+            from send_notify import send_notify
+
+            send_notify("Xbox俱乐部签到简报", _report)
+        except Exception as _ne2:
+            print("[notify] 跳过:", _ne2)
     return 0
 
 

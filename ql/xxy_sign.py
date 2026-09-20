@@ -15,7 +15,7 @@
 # PROXY_API        可选，HTTP/socks5 代理提取地址
 # PROXY_TYPE       可选，http / socks5
 # QL_NOTIFY        可选，设为 0 关闭推送
-# 注：推送只走 tools/sendNotify.js，不读 PushPlus 等推送环境变量
+# 注：推送结果由 send_notify 统一短文案输出（如「企业微信推送成功」）
 #
 # 契约（appid wxfc766f1e9a63b01f）：
 # code     POST {wx_server_url}/wx/code  auth:{wx_auth}  json:{openid,appid}
@@ -38,7 +38,7 @@ import json
 import logging
 import os
 import random
-import subprocess
+import re
 import sys
 import time
 import traceback
@@ -108,52 +108,24 @@ def split_openids(raw: str) -> List[str]:
 
 
 try:
-    from send_notify import send_notify
+    from send_notify import (
+        format_report,
+        mask_phone,
+        notify_and_format,
+        send_notify,
+    )
 except Exception:
-    def send_notify(title: str, content: str) -> None:
-        """只调用 tools/sendNotify.js，不读 PushPlus 环境变量。"""
-        if (os.getenv("QL_NOTIFY") or "").strip().lower() in ("0", "false", "no"):
-            print("[notify] QL_NOTIFY=0，跳过推送")
-            return
-        here = os.path.dirname(os.path.abspath(__file__))
-        candidates = [
-            os.path.join(here, "..", "tools", "sendNotify.js"),
-            "/ql/data/scripts/tools/sendNotify.js",
-            "/ql/data/scripts/sendNotify.js",
-        ]
-        js = None
-        for p in candidates:
-            if os.path.isfile(p):
-                js = os.path.normpath(p)
-                break
-        if not js:
-            print("[notify] 未找到 tools/sendNotify.js")
-            return
-        runner = (
-            "const m=require(process.argv[1]);"
-            "const fn=m.sendNotify||m.default||m;"
-            "Promise.resolve(fn(process.argv[2],process.argv[3]))"
-            ".then(()=>console.log('[notify] sendNotify.js ok'))"
-            ".catch(e=>{console.error(e);process.exit(1)});"
-        )
-        for node in (os.environ.get("node") or "node", "nodejs", "node"):
-            try:
-                r = subprocess.run(
-                    [node, "-e", runner, js, title, content],
-                    capture_output=True,
-                    timeout=25,
-                    text=True,
-                )
-                if r.stdout:
-                    print(r.stdout.strip()[-200:])
-                if r.returncode == 0:
-                    return
-                if r.stderr:
-                    print(r.stderr.strip()[-200:])
-            except FileNotFoundError:
-                continue
-            except Exception as e:
-                print("[notify] node 异常:", e)
+    from send_notify import send_notify  # type: ignore
+
+    def mask_phone(phone):
+        s = re.sub(r"\D", "", str(phone or ""))
+        return (s[:3] + "****" + s[-4:]) if len(s) >= 11 else (s or "-")
+
+    def format_report(task, accounts, push_result="", cost_s=None):
+        return task
+
+    def notify_and_format(task, accounts, **kwargs):
+        return send_notify(task, str(accounts))
 
 
 class Smallcat:
@@ -530,73 +502,112 @@ def try_claim_rewards(token: str, claimable: list, proxies=None) -> List[str]:
 
 def hengan_run(token: str, proxies=None) -> Dict[str, Any]:
     out: Dict[str, Any] = {
-        "userMsg": "-", "signMsg": "-", "pointsMsg": "-",
-        "rewardMsg": "-", "success": False,
+        "account": "微信用户",
+        "phone": "",
+        "status": "-",
+        "reward": "-",
+        "month_days": None,
+        "patch_card": None,
+        "extra": [],
+        "success": False,
+        "error": "",
+        "userMsg": "-",
+        "signMsg": "-",
+        "pointsMsg": "-",
+        "rewardMsg": "-",
     }
     info = hengan_get(HENGAN_USERINFO, token, proxies)
     d = info.get("data") or {}
     if info.get("success") is not True:
-        out["error"] = f"读取用户失败: {json_preview(info)}"
+        out["error"] = f"读取用户失败: {(info.get('msg') or '')[:80]}"
         return out
-    out["userMsg"] = f"{d.get('nickname') or '微信用户'} ({d.get('phone') or '-'})"
+    out["account"] = str(d.get("nickname") or "微信用户")
+    out["phone"] = str(d.get("phone") or "")
 
     sign = hengan_post(HENGAN_SIGN, token, {"sign": 1, "integral": 1, "all": 1}, proxies)
     sd = sign.get("data") or {}
+    cont = sd.get("sumSignDay", sd.get("signNum"))
     if sign.get("success") is True:
         if sd.get("isDaySign") is True:
-            out["signMsg"] = f"今日已签到（连续 {sd.get('sumSignDay', sd.get('signNum', '?'))} 天）"
+            out["status"] = f"今日已签到 ✅ (连续 {cont if cont is not None else '?'} 天)"
         else:
-            out["signMsg"] = f"签到成功（连续 {sd.get('sumSignDay', sd.get('signNum', '?'))} 天）"
-        if sd.get("integral") or sd.get("score"):
-            out["signMsg"] += f" +{sd.get('integral') or sd.get('score')}"
+            out["status"] = f"签到成功 ✅ (连续 {cont if cont is not None else '?'} 天)"
     else:
-        out["signMsg"] = sign.get("msg") or json_preview(sign, 120)
+        msg = sign.get("msg") or "签到失败"
+        if "已签" in str(msg) or "重复" in str(msg):
+            out["status"] = f"{msg} ✅ (连续 {cont if cont is not None else '?'} 天)"
+        else:
+            out["status"] = f"签到失败 ❌ ({str(msg)[:60]})"
+            out["error"] = str(msg)[:80]
 
+    gained = sd.get("integral") or sd.get("score")
     pts = hengan_post(HENGAN_SIGN_INTEGRAL, token, {}, proxies)
     if pts.get("success") is True:
-        gained = (pts.get("data") or {}).get("integral")
-        out["pointsMsg"] = f"+{gained} 积分" if gained is not None else (pts.get("msg") or "已领取")
+        g2 = (pts.get("data") or {}).get("integral")
+        if g2 is not None:
+            gained = g2
+        if gained is None:
+            out["reward"] = pts.get("msg") or "已领取"
+        else:
+            out["reward"] = f"+{gained}"
     else:
-        out["pointsMsg"] = pts.get("msg") or "-"
+        if gained is not None:
+            out["reward"] = f"+{gained}"
+        else:
+            out["reward"] = pts.get("msg") or "-"
 
-    # 累计签到 / 奖励查询
     try:
         cfg = hengan_get(HENGAN_SIGN_CONFIG, token, proxies)
         month = hengan_get(HENGAN_SIGN_CALENDAR, token, proxies)
         rewards = hengan_get(HENGAN_SIGN_REWARDS, token, proxies)
         supp = hengan_get(HENGAN_SIGN_SUPP, token, proxies)
         ex = parse_sign_extras(cfg, month, rewards, supp)
-        days = ex.get("signNum") or sd.get("sumSignDay") or sd.get("signNum") or d.get("signNum")
-        parts = [f"本月累计 {days if days is not None else '?'} 天"]
-        if ex.get("config_days"):
-            parts.append("档位" + "/".join(str(x) for x in ex["config_days"]))
+        days = ex.get("signNum") or cont or d.get("signNum")
+        try:
+            out["month_days"] = int(days) if days is not None else None
+        except Exception:
+            out["month_days"] = None
         if ex.get("supp") is not None:
-            parts.append(f"补签卡 {ex['supp']}")
+            out["patch_card"] = ex["supp"]
+        extras: List[str] = []
         if ex.get("reward_summary"):
-            parts.append("奖励: " + ex["reward_summary"])
+            extras.append("奖励: " + ex["reward_summary"])
         if ex.get("claimable"):
-            parts.append(f"可领候选 {len(ex['claimable'])} 项")
+            extras.append(f"可领候选 {len(ex['claimable'])} 项")
             claim_lines = try_claim_rewards(token, ex["claimable"], proxies)
-            if claim_lines:
-                parts.append("；".join(claim_lines[:3]))
-        else:
-            parts.append("暂无待领（或随签到自动发放）")
-        out["rewardMsg"] = " | ".join(parts)
-        print("🎁 [累计奖励]", out["rewardMsg"])
+            extras.extend(claim_lines[:2])
+        out["extra"] = extras
         if os.getenv("xxy_debug"):
-            print("[debug] rewards raw", json_preview(rewards, 500))
-            print("[debug] config raw", json_preview(cfg, 400))
+            print("[debug] rewards keys", list(rewards.keys())[:8] if isinstance(rewards, dict) else type(rewards))
     except Exception as e:
-        out["rewardMsg"] = f"累计奖励查询失败: {e}"
+        out["extra"] = [f"累计查询失败: {e}"]
 
-    out["success"] = True
+    # 兼容旧字段
+    out["userMsg"] = f"{out['account']} ({mask_phone(out['phone']) if out['phone'] else '-'})"
+    out["signMsg"] = out["status"]
+    out["pointsMsg"] = out["reward"]
+    out["rewardMsg"] = f"本月已签 {out['month_days'] if out['month_days'] is not None else '?'} 天"
+    if out.get("patch_card") is not None:
+        out["rewardMsg"] += f" | 补签卡 {out['patch_card']}"
+    if out["status"].startswith("签到失败"):
+        out["success"] = False
+    else:
+        out["success"] = True
+        out["error"] = ""
     return out
 
 
 def run_account(openid: str, sm: Smallcat) -> Dict[str, Any]:
-    result = {
-        "openid": openid, "success": False, "token": "-",
-        "userMsg": "-", "signMsg": "-", "pointsMsg": "-", "rewardMsg": "-",
+    result: Dict[str, Any] = {
+        "openid": openid,
+        "success": False,
+        "account": "微信用户",
+        "phone": "",
+        "status": "-",
+        "reward": "-",
+        "month_days": None,
+        "patch_card": None,
+        "extra": [],
         "error": "",
     }
     proxies = get_valid_proxy()
@@ -611,42 +622,24 @@ def run_account(openid: str, sm: Smallcat) -> Dict[str, Any]:
             code = sm.wx_code(openid, APPID)
         except Exception as e:
             result["error"] = str(e)
+            result["status"] = f"获取 code 失败 ❌ ({str(e)[:60]})"
             return result
         time.sleep(random.uniform(0.5, 2.0))
         token, raw = login_by_code(code, proxies)
         if not token:
-            result["error"] = f"登录失败: {json_preview(raw)}"
+            result["error"] = "登录失败"
+            result["status"] = "登录失败 ❌"
             return result
         set_cached_token(openid, token)
         hres = hengan_run(token, proxies)
-    result["token"] = mask(token)
-    result["userMsg"] = hres.get("userMsg", "-")
-    result["signMsg"] = hres.get("signMsg", "-")
-    result["pointsMsg"] = hres.get("pointsMsg", "-")
-    result["rewardMsg"] = hres.get("rewardMsg", "-")
-    result["success"] = bool(hres.get("success"))
-    if not hres.get("success"):
-        result["error"] = hres.get("error") or "签到失败"
+    for k in ("account", "phone", "status", "reward", "month_days", "patch_card", "extra", "success", "error"):
+        if k in hres:
+            result[k] = hres[k]
     return result
 
 
-def build_notify(results: List[Dict[str, Any]]) -> str:
-    ok_n = sum(1 for x in results if x.get("success"))
-    lines = [f"芯享会（心相印） {ok_n}/{len(results)}", f"时间 {now_text()}"]
-    for res in results:
-        icon = "✅" if res.get("success") else "❌"
-        lines.append(
-            f"{icon} [{mask(res.get('openid'))}] "
-            f"{res.get('userMsg','-')} | {res.get('signMsg','-')} | {res.get('pointsMsg','-')}"
-        )
-        if res.get("rewardMsg") and res.get("rewardMsg") != "-":
-            lines.append(f"   累计: {res['rewardMsg']}")
-        if not res.get("success") and res.get("error"):
-            lines.append(f"   {res['error']}")
-    return "\n".join(lines)
-
-
 def main() -> int:
+    started = time.time()
     sc_base = os.getenv("wx_server_url", "").strip()
     sc_auth = os.getenv("wx_auth", "").strip()
     raw = os.getenv("xxy", "").strip()
@@ -658,7 +651,7 @@ def main() -> int:
         print("缺少 xxy（openid，多账号换行或 & 分隔）")
         return 1
     sm = Smallcat(sc_base, sc_auth)
-    print(f"{APP_NAME} | {len(openids)}账号 | appid={APPID}")
+    print(f"{APP_NAME} | {len(openids)}账号")
 
     results: List[Dict[str, Any]] = []
     for openid in openids:
@@ -668,25 +661,30 @@ def main() -> int:
             res = run_account(openid, sm)
         except Exception:
             res = {
-                "openid": openid, "success": False, "token": "-",
-                "userMsg": "-", "signMsg": "-", "pointsMsg": "-", "rewardMsg": "-",
-                "error": traceback.format_exc().strip()[:200],
+                "openid": openid,
+                "success": False,
+                "account": mask(openid),
+                "phone": "",
+                "status": "脚本异常 ❌",
+                "reward": "-",
+                "month_days": None,
+                "patch_card": None,
+                "extra": [],
+                "error": traceback.format_exc().strip().splitlines()[-1][:80],
             }
         results.append(res)
-        icon = "✅" if res.get("success") else "❌"
-        print(
-            f"{icon} [{mask(openid)}] {res.get('userMsg','-')} | "
-            f"{res.get('signMsg','-')} | {res.get('pointsMsg','-')}"
-        )
-        if res.get("rewardMsg") and res.get("rewardMsg") != "-":
-            print("   累计:", res["rewardMsg"])
-        if not res.get("success") and res.get("error"):
-            print("   ", res["error"])
 
+    try:
+        notify_and_format(
+            APP_NAME,
+            results,
+            title=f"芯享会签到 {sum(1 for x in results if x.get('success'))}/{len(results)}",
+            start_ts=started,
+        )
+    except Exception:
+        # 兜底：至少把账号块打出来
+        print(format_report(APP_NAME, results, push_result="推送模块异常", cost_s=time.time() - started))
     ok_n = sum(1 for x in results if x.get("success"))
-    print("-" * 32)
-    print(f"结果 {ok_n}/{len(results)}")
-    send_notify(f"芯享会签到 {ok_n}/{len(results)}", build_notify(results))
     return 0 if ok_n == len(results) else 1
 
 

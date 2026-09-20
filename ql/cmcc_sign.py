@@ -486,9 +486,9 @@ def prize_info(cm: Dict[str, str], yx: str, touch_id: str) -> Dict[str, Any]:
 
 
 def main() -> int:
+    started = time.time()
     yx = os.getenv("cmcc_yx", "JHT042591F0005").strip()
     touch_id = os.getenv("cmcc_touch_id", "26-05-10005-2007-A01").strip()
-    # 默认执行签到；cmcc_execute=0 时仅 dry-run
     _ex = os.getenv("cmcc_execute")
     execute = True if _ex is None or _ex.strip() == "" else _ex.strip() not in ("0", "false", "no")
     openids_raw = os.getenv("cmcc", "").strip()
@@ -518,59 +518,86 @@ def main() -> int:
 
     mode = "签到" if execute else "DRY-RUN"
     print(f"中国移动10086 | {mode} | {len(openids)}账号")
-    print(f"延时 {delay_min:.0f}~{delay_max:.0f}s")
 
-    lines: List[str] = []
+    accounts: List[Dict[str, Any]] = []
     for idx, oid in enumerate(openids):
         if idx > 0:
             jitter(delay_min, delay_max)
-        label = ""
+        acc: Dict[str, Any] = {
+            "account": mask(oid),
+            "phone": "",
+            "status": "-",
+            "reward": "-",
+            "month_days": None,
+            "extra": [],
+            "error": "",
+            "success": False,
+        }
+        extras: List[str] = []
         try:
             cm = acquire_mark_session(base, oid, yx, touch_id)
             jitter(1.5, 5.0)
             prize_hint = ""
-            info = None
             try:
                 info = prize_info(cm, yx, touch_id)
                 bd = info.get("data") or {}
                 prize_hint = extract_prize_summary(info)
-                # 进度一行（仍保持简短）
                 mt = bd.get("markedTimes")
                 tt = bd.get("totalMarkTimes")
                 tm = bd.get("todayMarked")
+                if mt is not None:
+                    try:
+                        acc["month_days"] = int(mt)
+                    except Exception:
+                        pass
                 if mt is not None or tm is not None:
-                    print(f"  进度 {mt}/{tt} 今日已签={tm}"
-                          + (f" 奖励={prize_hint}" if prize_hint else ""))
+                    extras.append(f"进度 {mt}/{tt} 今日已签={tm}")
             except Exception:
                 pass
 
             if not execute:
-                label = f"✅ [{mask(oid)}] 登录链 OK（未执行签到）"
+                acc["status"] = "登录链 OK（未执行签到）✅"
+                acc["success"] = True
                 if prize_hint:
-                    label += f" | 奖励: {prize_hint}"
+                    acc["reward"] = prize_hint
             else:
                 raw = do_mark(cm, yx, touch_id)
                 ok, msg = interpret_sign(raw, prize_hint=prize_hint)
-                # mark 成功但没文案时，再用 prizeInfo 补一次
-                if ok and prize_hint and "奖励:" not in msg:
-                    msg = f"{msg} | 奖励: {prize_hint}"
-                label = ("✅" if ok else "❌") + f" [{mask(oid)}] {msg}"
+                acc["status"] = (msg or "签到完成") + (" ✅" if ok else " ❌")
+                acc["success"] = bool(ok)
+                if prize_hint:
+                    acc["reward"] = prize_hint
+                if not ok:
+                    acc["error"] = msg
         except Exception as e:
-            label = f"❌ [{mask(oid)}] {e}"
-        lines.append(label)
-        print(label)
+            acc["status"] = f"异常 ❌ ({str(e)[:60]})"
+            acc["error"] = str(e)[:80]
+        acc["extra"] = extras
+        accounts.append(acc)
 
-    ok_n = sum(1 for x in lines if x.startswith("✅"))
-    print("-" * 32)
-    print(f"结果 {ok_n}/{len(lines)}")
-    _report = "\n".join(lines)
+    ok_n = sum(1 for a in accounts if a.get("success"))
     try:
-        from send_notify import send_notify
+        from send_notify import notify_and_format
 
-        send_notify(f"中国移动10086签到 {ok_n}/{len(lines)}", _report)
+        notify_and_format(
+            "中国移动10086",
+            accounts,
+            title=f"中国移动10086签到 {ok_n}/{len(accounts)}",
+            start_ts=started,
+        )
     except Exception as _ne:
-        print("[notify] 跳过:", _ne)
-    return 0 if ok_n == len(lines) else 1
+        print("[notify] 使用旧格式:", _ne)
+        _report = "\n".join(
+            f"{'✅' if a.get('success') else '❌'} [{a.get('account')}] {a.get('status')}" for a in accounts
+        )
+        print(_report)
+        try:
+            from send_notify import send_notify
+
+            send_notify(f"中国移动10086签到 {ok_n}/{len(accounts)}", _report)
+        except Exception as _ne2:
+            print("[notify] 跳过:", _ne2)
+    return 0 if ok_n == len(accounts) else 1
 
 
 if __name__ == "__main__":

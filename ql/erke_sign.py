@@ -304,24 +304,49 @@ def ensure_login(
     return profile
 
 
-def run_one(sm: Smallcat, erke: Erke, openid: str, cache: Dict[str, Any]) -> str:
+def run_one(sm: Smallcat, erke: Erke, openid: str, cache: Dict[str, Any]) -> Dict[str, Any]:
     name = openid[-8:]
+    acc: Dict[str, Any] = {
+        "account": name,
+        "phone": "",
+        "status": "-",
+        "reward": "-",
+        "extra": [],
+        "error": "",
+        "success": False,
+    }
     try:
         profile = ensure_login(sm, erke, openid, cache)
         mid = profile.get("memberId")
         if not mid or str(mid) == "-1":
-            return f"❌ [{name}] 登录失败，无 memberId（下轮再试，避免限流）"
+            acc["status"] = "登录失败 ❌（无 memberId，下轮再试）"
+            acc["error"] = "无 memberId"
+            return acc
 
         points_before = erke.get_points(profile)
         ok, msg = erke.sign_in(profile)
         points_after = erke.get_points(profile)
-        mark = "✅" if ok else "❌"
-        return f"{mark} [{name}] {msg} (积分 {points_before} → {points_after})"
+        acc["success"] = bool(ok)
+        acc["status"] = (msg or ("签到成功" if ok else "签到失败")) + (" ✅" if ok else " ❌")
+        delta = None
+        try:
+            delta = int(points_after) - int(points_before)
+        except Exception:
+            delta = None
+        if delta is not None:
+            acc["reward"] = f"+{delta}" if delta >= 0 else str(delta)
+        acc["extra"] = [f"积分 {points_before} → {points_after}"]
+        if not ok:
+            acc["error"] = msg
+        return acc
     except Exception as e:
-        return f"❌ [{name}] 异常: {e}"
+        acc["status"] = f"异常 ❌ ({str(e)[:60]})"
+        acc["error"] = str(e)[:80]
+        return acc
 
 
 def main() -> int:
+    started = time.time()
     auth = os.getenv("wx_auth", "").strip()
     base = os.getenv("wx_server_url", "").strip()
     openids_raw = os.getenv("hxek", "").strip()
@@ -343,24 +368,36 @@ def main() -> int:
     erke = Erke(appid, scene)
     cache = load_cache()
 
-    lines = []
+    accounts: List[Dict[str, Any]] = []
     for oid in openids:
-        line = run_one(sm, erke, oid, cache)
-        log.info(line)
-        lines.append(line)
+        acc = run_one(sm, erke, oid, cache)
+        accounts.append(acc)
         time.sleep(3)
 
-    print("\n" + "=" * 36)
-    print("      鸿星尔克签到简报")
-    print("=" * 36)
-    _report = "\n".join(lines)
-    print(_report)
+    ok_n = sum(1 for a in accounts if a.get("success"))
     try:
-        from send_notify import send_notify
+        from send_notify import notify_and_format
 
-        send_notify("鸿星尔克签到简报", _report)
+        notify_and_format(
+            "鸿星尔克",
+            accounts,
+            title=f"鸿星尔克签到 {ok_n}/{len(accounts)}",
+            start_ts=started,
+        )
     except Exception as _ne:
-        print("[notify] 跳过:", _ne)
+        print("[notify] 使用旧格式:", _ne)
+        lines = []
+        for a in accounts:
+            mark = "✅" if a.get("success") else "❌"
+            lines.append(f"{mark} [{a.get('account')}] {a.get('status')} {a.get('reward')}")
+        _report = "\n".join(lines)
+        print(_report)
+        try:
+            from send_notify import send_notify
+
+            send_notify("鸿星尔克签到简报", _report)
+        except Exception as _ne2:
+            print("[notify] 跳过:", _ne2)
     return 0
 
 
