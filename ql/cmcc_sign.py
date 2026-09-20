@@ -45,7 +45,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 logging.basicConfig(
-    level=logging.DEBUG if os.getenv("CMCC_DEBUG") else logging.INFO,
+    level=logging.DEBUG if os.getenv("CMCC_DEBUG") else logging.WARNING,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 log = logging.getLogger("CMCC")
@@ -66,7 +66,10 @@ UA = (
     "MicroMessenger/8.0.76.3141(0x28004C31) WeChat/arm64 Weixin "
     "NetType/WIFI Language/zh_CN ABI/arm64 miniProgram/wx43aab19a93a3a6f2"
 )
-ALREADY_RE = re.compile(r"已签|已经签|签到过|重复|already|TODAY_MARKED", re.I)
+ALREADY_RE = re.compile(
+    r"已签|已经签|签到过|重复|already|TODAY_MARKED|ALL_MARKED|全部签完|已经全部签",
+    re.I,
+)
 CTX = ssl._create_unverified_context()
 
 
@@ -273,18 +276,16 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
         raise RuntimeError("缺少 wx_server_url / wx_auth")
     sm = Smallcat(sm_base, sm_auth)
 
-    log.info("1) /wx/code appid=%s openid=%s", MP_APPID, mask(openid))
+    log.info("登录 openid=%s", mask(openid))
     code = sm.wx_code(openid, MP_APPID)
-    log.info("   code ok len=%d", len(code))
+    log.debug("code len=%d", len(code))
     jitter(0.8, 2.5)
 
-    log.info("2) login %s", MP_BASE)
     st, sc, body = http_request(
         "GET", f"{MP_BASE}/wmhnewcenter/wechat86-applet/login",
         headers={"X-WX-Code": code, "Lrsbhbg8": X_CFG},
-        prefer_curl=True,  # 部分网络 Python TLS 不可用
+        prefer_curl=True,
     )
-    log.info("   login http=%s body_head=%s", st, body[:220].replace("\n", " "))
     j = decrypt_payload(body) if isinstance(body, str) else body
     if not isinstance(j, dict):
         j = parse_json(body) or {}
@@ -292,18 +293,15 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
     if not session_id and isinstance(j, dict) and isinstance(j.get("data"), dict):
         session_id = dig_session(j["data"], "sessionId")
     if not session_id:
-        raise RuntimeError(f"login 无 sessionId: {str(j)[:200]}")
-    log.info("   sessionId=%s", mask(session_id))
+        raise RuntimeError(f"login 失败 http={st}")
     jitter(0.8, 2.5)
 
-    log.info("3) wmhsso SSO_YQS")
     st2, _, body2 = http_request(
         "POST", f"{MP_BASE}/wmhnewcenter/wechat86-applet/wmhsso?redirectSource=SSO_YQS",
         headers={JWT_HDR: session_id, "Lrsbhbg8": X_CFG},
         body={},
         prefer_curl=True,
     )
-    log.info("   sso http=%s body_head=%s", st2, body2[:220].replace("\n", " "))
     j2 = decrypt_payload(body2) if isinstance(body2, str) else body2
     if not isinstance(j2, dict):
         j2 = parse_json(body2) or {}
@@ -311,16 +309,13 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
     if not wmh and isinstance(j2, dict) and isinstance(j2.get("data"), dict):
         wmh = dig_session(j2["data"], "token")
     if not wmh:
-        raise RuntimeError(f"wmhsso 无 token: {str(j2)[:200]}")
-    log.info("   wmhToken=%s", mask(wmh))
+        raise RuntimeError(f"wmhsso 失败 http={st2}")
     jitter(1.0, 3.0)
 
     referer = (
         f"{H5_BASE}/qwhdhub/qwhdmark/{ACTIVITY_ID}"
         f"?ys=&yx={yx}&touch_id={touch_id}&wmhToken={wmh}"
     )
-    # 先打开活动页建立 H5 会话（源码 weblink 拼 wmhToken 后进 H5）
-    log.info("4a) 打开活动页")
     st_page, sc_page, body_page = http_request(
         "GET", referer,
         headers={
@@ -330,8 +325,6 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
         },
         prefer_curl=True,
     )
-    log.info("   page http=%s cookies=%s", st_page,
-             [c.split(";")[0].split("=")[0] for c in sc_page.get("Set-Cookie", [])])
     cookies: Dict[str, str] = {
         "qwhd_center_router": "hua",
         "yx": yx,
@@ -343,10 +336,9 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
         if m:
             cookies[k] = m.group(1)
     if "QWHD_SESSION_TOKEN" in cookies:
-        log.info("   活动页直接拿到 QWHD_SESSION_TOKEN=%s", mask(cookies["QWHD_SESSION_TOKEN"]))
+        log.info("会话 OK")
         return cookies
 
-    log.info("4b) qwhd user/info")
     st3, sc3, body3 = http_request(
         "POST", f"{H5_BASE}/qwhdhub/api/mark/user/info?_traceId={int(time.time()*1000)}_1",
         headers={
@@ -361,17 +353,14 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
         body={"appVersion": "", "miniVersion": ""},
         prefer_curl=True,
     )
-    log.info("   user/info http=%s body_head=%s", st3, body3[:220].replace("\n", " "))
     blob = "\n".join(sc3.get("Set-Cookie", [])) + "\n" + body3
     for k in ("QWHD_SESSION_TOKEN", "d.sid", "shareToken"):
         m = re.search(rf"{re.escape(k)}=([^;\s\"']+)", blob)
         if m:
             cookies[k] = m.group(1)
     if "QWHD_SESSION_TOKEN" not in cookies:
-        raise RuntimeError(
-            f"未获取到 QWHD_SESSION_TOKEN。set-cookie={sc3.get('Set-Cookie')} body={body3[:180]}"
-        )
-    log.info("   QWHD_SESSION_TOKEN=%s", mask(cookies["QWHD_SESSION_TOKEN"]))
+        raise RuntimeError("未获取到 QWHD_SESSION_TOKEN")
+    log.info("会话 OK")
     return cookies
 
 
@@ -382,13 +371,21 @@ def cookie_header(cm: Dict[str, str]) -> str:
 def interpret_sign(raw: Dict[str, Any]) -> Tuple[bool, str]:
     if not raw or not isinstance(raw, dict):
         return False, "未知返回"
-    code = raw.get("code")
+    code = str(raw.get("code") or "")
     msg = str(raw.get("msg") or raw.get("message") or "").strip()
     success = raw.get("success") is True
-    is_done = bool(ALREADY_RE.search(msg)) or code == "TODAY_MARKED"
-    if success or code in ("SUCCESS", 0, "0") or is_done:
+    is_done = (
+        bool(ALREADY_RE.search(msg))
+        or code in ("TODAY_MARKED", "ALL_MARKED")
+        or "全部签完" in msg
+        or "已经全部" in msg
+    )
+    if success or code in ("SUCCESS", "0", "0") or is_done:
         prize = ((raw.get("data") or {}) or {}).get("prizeName")
-        label = "今日已签到" if is_done else (msg or "签到成功")
+        if is_done:
+            label = msg or "今日已签到/已签完"
+        else:
+            label = msg or "签到成功"
         if prize:
             label += f" | 奖品: {prize}"
         return True, label
@@ -411,7 +408,7 @@ def do_mark(cm: Dict[str, str], yx: str, touch_id: str) -> Dict[str, Any]:
         body={},
         prefer_curl=True,
     )
-    log.info("mark http=%s body=%s", st, body[:240])
+    log.debug("mark body=%s", body[:160])
     return parse_json(body) or {}
 
 
@@ -465,52 +462,41 @@ def main() -> int:
     delay_min = float(os.getenv("cmcc_delay_min", "8") or 8)
     delay_max = float(os.getenv("cmcc_delay_max", "25") or 25)
 
-    mode = "执行签到" if execute else "DRY-RUN（仅验证登录链，不调 mark）"
-    print("=" * 40)
-    print(f"  中国移动10086 | {mode} | {len(openids)} 账号")
-    print(f"  账号间隔随机延时 {delay_min:.0f}~{delay_max:.0f}s")
-    print("=" * 40)
+    mode = "签到" if execute else "DRY-RUN"
+    print(f"中国移动10086 | {mode} | {len(openids)}账号")
+    print(f"延时 {delay_min:.0f}~{delay_max:.0f}s")
 
     lines: List[str] = []
     for idx, oid in enumerate(openids):
         if idx > 0:
-            w = jitter(delay_min, delay_max)
-            log.info("随机延时 %.1fs 后处理下一账号", w)
+            jitter(delay_min, delay_max)
         label = ""
         try:
             cm = acquire_mark_session(base, oid, yx, touch_id)
-            # 签到前再抖一下
-            w = jitter(1.5, 5.0)
-            log.info("签到前延时 %.1fs", w)
+            jitter(1.5, 5.0)
             try:
                 info = prize_info(cm, yx, touch_id)
                 bd = info.get("data") or {}
-                log.info(
-                    "状态: 已签 %s/%s today=%s",
-                    bd.get("markedTimes", "?"),
-                    bd.get("totalMarkTimes", "?"),
-                    bd.get("todayMarked"),
-                )
-            except Exception as e:
-                log.debug("prize_info: %s", e)
+                log.debug("prize %s/%s today=%s",
+                          bd.get("markedTimes"), bd.get("totalMarkTimes"), bd.get("todayMarked"))
+            except Exception:
+                pass
 
             if not execute:
-                label = f"✅ [{mask(oid)}] 登录链 OK (QWHD_SESSION_TOKEN 已获取，未执行签到)"
+                label = f"✅ [{mask(oid)}] 登录链 OK（未执行签到）"
             else:
                 raw = do_mark(cm, yx, touch_id)
                 ok, msg = interpret_sign(raw)
                 label = ("✅" if ok else "❌") + f" [{mask(oid)}] {msg}"
         except Exception as e:
             label = f"❌ [{mask(oid)}] {e}"
-        log.info(label)
         lines.append(label)
+        print(label)
 
     ok_n = sum(1 for x in lines if x.startswith("✅"))
-    print("\n" + "=" * 40)
-    print(f"  结果 {ok_n}/{len(lines)}")
-    print("=" * 40)
+    print("-" * 32)
+    print(f"结果 {ok_n}/{len(lines)}")
     _report = "\n".join(lines)
-    print(_report)
     try:
         from notify_report import send_ql_notify
 
