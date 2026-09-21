@@ -47,6 +47,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -319,7 +320,8 @@ def run_account(
         mobile = auth.get("mobile") or ""
         acc["phone"] = mobile
         if auth.get("userId"):
-            extras.append(f"userId={auth.get('userId')}")
+            uid = str(auth.get("userId") or "")
+            extras.append(f"userId={(uid[:4] + '***') if len(uid) > 6 else '***'}")
 
         api = YzWeappCheckin(auth["accessToken"], auth["sessionId"], appid, kdt, cid, uuid)
         act = api.activity()
@@ -342,10 +344,13 @@ def run_account(
             acc["error"] = "活动未开启"
         else:
             ok, msg = api.do_checkin()
-            acc["status"] = (msg or "签到成功") + (" ✅" if ok else " ❌")
+            if not ok and re.search(r"手机号未授权|未授权手机号|未绑定", msg or ""):
+                acc["status"] = f"{(msg or '手机号未授权')[:36]} ❌"
+                acc["error"] = f"{msg} (code=1000030102)" if "code=" not in (msg or "") else (msg or "")
+            else:
+                acc["status"] = (msg or "签到成功") + (" ✅" if ok else " ❌")
+                acc["error"] = "" if ok else (msg or "")
             acc["success"] = bool(ok)
-            if not ok:
-                acc["error"] = msg
 
         days = api.month_days()
         acc["month_days"] = len(days)

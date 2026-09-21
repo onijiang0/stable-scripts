@@ -154,6 +154,20 @@ def mask_ref(ref: str) -> str:
     return (s[:6] + "***" + s[-4:]) if len(s) > 12 else (s or "-")
 
 
+def mask_id(value: Any, keep: int = 6) -> str:
+    s = str(value or "")
+    return (s[:keep] + "***") if len(s) > keep else (s or "-")
+
+
+def biz_fail_status(code: Any, message: str) -> str:
+    """业务失败状态文案；code 可打，隐私不进日志。"""
+    msg = clean_line(message) or "业务失败"
+    code_s = str(code or "")
+    if re.search(r"手机号未授权|未授权手机号|未绑定手机|尚未注册|未注册", msg):
+        return f"手机号未授权/未绑定（code={code_s}）❌"
+    return f"{msg[:40]} (code={code_s}) ❌"
+
+
 def split_openids(raw: str) -> List[str]:
     out: List[str] = []
     for part in (raw or "").replace("&", "\n").splitlines():
@@ -171,9 +185,23 @@ def success(payload: Any) -> bool:
 
 def token_error(error: Exception) -> bool:
     code = str(getattr(error, "code", "") or "")
+    # 仅明确鉴权失败才算登录失效；「非法请求」多为方法/参数问题，不盲目重登
     if code in {"401", "40101", "100401", "1004010"}:
         return True
-    return bool(re.search(r"token|登录|登陆|未登录|请先登录|凭证|身份.*失效", str(error), re.I))
+    msg = str(error)
+    if re.search(r"非法请求|参数错误|缺少参数", msg):
+        return False
+    return bool(re.search(r"token失效|登录失效|未登录|请先登录|凭证失效|身份.*失效|invalid token|unauthorized", msg, re.I))
+
+
+def mask_token(token: str) -> str:
+    s = str(token or "")
+    return f"有(len={len(s)})" if s else "无"
+
+
+def mask_code(code: str) -> str:
+    s = str(code or "")
+    return f"有(len={len(s)},前6={s[:6]})" if s else "无"
 
 
 def safe_json(response: requests.Response) -> Dict[str, Any]:
@@ -190,6 +218,12 @@ def safe_json(response: requests.Response) -> Dict[str, Any]:
 
 def http(method: str, url: str, *, headers=None, json_body=None, params=None) -> Dict[str, Any]:
     """统一封装业务 HTTP：状态码 + JSON + 异常。"""
+    path = url.replace(BASE_URL, "") or url
+    debug = os.getenv("ASDCB_DEBUG", "").strip().lower() in ("1", "true", "yes")
+    if debug:
+        body_keys = list((json_body or {}).keys()) if isinstance(json_body, dict) else type(json_body).__name__
+        has_token = "yes" if (headers or {}).get("Qm-User-Token") else "no"
+        print(f"ℹ️ HTTP {method} {path} token={has_token} body={body_keys}")
     try:
         resp = api_session.request(
             method,
@@ -205,7 +239,12 @@ def http(method: str, url: str, *, headers=None, json_body=None, params=None) ->
         raise ApiError(f"网络异常: {clean_line(e)}")
     if resp.status_code != 200:
         raise ApiError(f"HTTP {resp.status_code}")
-    return safe_json(resp)
+    data = safe_json(resp)
+    if debug or not success(data):
+        biz_code = data.get("code")
+        msg = clean_line(data.get("message") or data.get("msg") or "")
+        print(f"{'ℹ️' if success(data) else '⚠️'} {method} {path} code={biz_code} msg={msg[:80]}")
+    return data
 
 
 def build_headers(token: str = "", include_scene: bool = True) -> Dict[str, str]:
@@ -303,11 +342,18 @@ class Account:
 
     def ensure_success(self, payload: Dict[str, Any], action: str) -> Any:
         if not success(payload):
-            raise ApiError(payload.get("message") or f"{action}失败", payload.get("code"))
+            msg = str(payload.get("message") or payload.get("msg") or f"{action}失败")
+            code = payload.get("code")
+            # code 登录即可跑通的业务码：明确写出，不重登
+            if re.search(r"手机号未授权|未授权手机号|未绑定手机|尚未注册", msg):
+                raise ApiError(f"{biz_fail_status(code, msg)}", str(code or ""))
+            raise ApiError(f"{action}: {msg} (code={code})", str(code or ""))
         return payload.get("data")
 
     def api_post(self, path: str, payload: Dict[str, Any]) -> Any:
-        data = http("POST", BASE_URL + path, headers=build_headers(self.token), json_body=payload)
+        body = dict(payload or {})
+        body.setdefault("appid", APPID)
+        data = http("POST", BASE_URL + path, headers=build_headers(self.token), json_body=body)
         return self.ensure_success(data, path)
 
     def api_get(self, path: str, params=None) -> Any:
@@ -317,6 +363,7 @@ class Account:
     def login(self) -> None:
         print("🔐 登录")
         code = get_wx_code(self.openid)
+        print(f"ℹ️ 取码结果 code={mask_code(code)}")
         payload = http(
             "POST",
             BASE_URL + LOGIN_PATH,
@@ -325,15 +372,25 @@ class Account:
         )
         data = self.ensure_success(payload, "登录") or {}
         user = data.get("user") or {}
-        self.token = str(data.get("token") or "")
-        self.mobile = str(user.get("mobile") or "")
-        self.user_name = str(user.get("username") or user.get("nickname") or "")
+        # 兼容 token 可能嵌套在 data 内层
+        token = data.get("token") or data.get("accessToken") or data.get("access_token")
+        if not token and isinstance(data.get("data"), dict):
+            inner = data["data"]
+            token = inner.get("token") or inner.get("accessToken")
+            user = inner.get("user") or user
+        self.token = str(token or "")
+        self.mobile = str(user.get("mobile") or user.get("mobilePhone") or "")
+        self.user_name = str(user.get("username") or user.get("nickname") or user.get("name") or "")
         self.qmai_openid = str(user.get("openid") or "")
-        self.user_id = str(user.get("id") or "")
+        self.user_id = str(user.get("id") or user.get("userId") or "")
+        print(
+            f"ℹ️ 登录结果: code={mask_code(code)} token={mask_token(self.token)} "
+            f"userId={mask_id(self.user_id, 6)} 手机={mask_phone(self.mobile) if self.mobile else '未知'}"
+        )
         if not self.token:
             raise ApiError("登录响应未返回 token")
         self.save_cache()
-        print("✅ 登录成功")
+        print("✅ 登录成功（code 已换 token，业务请求带 Qm-User-Token）")
 
     def save_cache(self) -> None:
         cache = read_cache()
@@ -350,9 +407,9 @@ class Account:
         item = read_cache().get(self.key) or {}
         self.token = str(item.get("token") or "")
         self.mobile = str(item.get("mobile") or "")
-        self.user_name = str(item.get("user_name") or "")
+        self.user_name = str(item.get("user_name") or item.get("userName") or "")
         self.qmai_openid = str(item.get("openid") or "")
-        self.user_id = str(item.get("user_id") or "")
+        self.user_id = str(item.get("user_id") or item.get("userId") or "")
         return bool(self.token)
 
     def clear_cache(self) -> None:
@@ -363,39 +420,57 @@ class Account:
 
     def validate_token(self) -> bool:
         try:
-            self.api_get(PROFILE_PATH)
+            self.query_profile()
             return True
-        except Exception:
+        except Exception as e:
+            print(f"ℹ️ token 校验: {clean_line(e)[:80]}")
             return False
 
     def query_profile(self) -> None:
-        data = self.api_get(PROFILE_PATH) or {}
+        # 企迈会员资料为 POST + appid
+        data = self.api_post(PROFILE_PATH, {"appid": APPID}) or {}
         user = data.get("userInfo") or data.get("user") or data
-        self.mobile = str(user.get("mobile") or user.get("phone") or self.mobile or "")
-        self.user_name = str(user.get("username") or user.get("nickname") or self.user_name or "")
+        if not isinstance(user, dict):
+            user = {}
+        self.mobile = str(user.get("mobilePhone") or user.get("mobile") or user.get("phone") or self.mobile or "")
+        self.user_name = str(
+            user.get("name") or user.get("nickName") or user.get("username") or self.user_name or ""
+        )
+        self.user_id = str(user.get("id") or user.get("userId") or self.user_id or "")
         if self.mobile or self.user_name:
             self.save_cache()
 
     def query_points(self) -> Optional[float]:
         try:
-            data = self.api_get(POINTS_PATH) or {}
-            for key in ("totalPoints", "points", "integral", "total"):
-                if data.get(key) is not None:
-                    return float(data.get(key))
+            data = self.api_post(POINTS_PATH, {"appid": APPID})
             if isinstance(data, (int, float)):
                 return float(data)
-        except Exception:
+            if isinstance(data, dict):
+                for key in ("totalPoints", "points", "integral", "total", "point"):
+                    if data.get(key) is not None:
+                        try:
+                            return float(data.get(key))
+                        except (TypeError, ValueError):
+                            pass
+        except Exception as e:
+            print(f"ℹ️ 积分查询: {clean_line(e)[:80]}")
             return None
         return None
 
     def query_detail(self) -> Dict[str, Any]:
-        return self.api_get(SIGN_DETAIL_PATH) or {}
+        data = self.api_post(SIGN_DETAIL_PATH, {"appid": APPID})
+        return data if isinstance(data, dict) else {}
 
     def query_rule(self) -> Dict[str, Any]:
         try:
-            return self.api_get(SIGN_RULE_PATH) or {}
-        except Exception:
+            data = self.api_post(SIGN_RULE_PATH, {"appid": APPID})
+        except Exception as e:
+            print(f"ℹ️ 签到规则: {clean_line(e)[:80]}")
             return {}
+        if isinstance(data, list) and data:
+            first = data[0] if isinstance(data[0], dict) else {}
+            return first.get("detailInfo") or first or {}
+        return data if isinstance(data, dict) else {}
 
     def reward_progress(self, detail: Dict[str, Any], rule: Dict[str, Any]):
         role = int(rule.get("signInCalculationRole") or 0)
