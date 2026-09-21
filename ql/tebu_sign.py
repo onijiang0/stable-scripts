@@ -238,6 +238,93 @@ def extract_token(data: Any) -> Optional[str]:
     return None
 
 
+def extract_shop_id(data: Any) -> str:
+    """优先登录返回的 shopId（包内 UserShopId），否则默认 SHOP_ID。"""
+    if isinstance(data, dict):
+        for src in (data.get("result"), data.get("data"), data):
+            if isinstance(src, dict):
+                sid = src.get("shopId") or src.get("UserShopId")
+                if sid not in (None, "", "null"):
+                    return str(sid)
+    return SHOP_ID
+
+
+def api_get(path: str, token: str, shop_id: str = "") -> Dict[str, Any]:
+    """GET：URL 与 sign 都使用同一 shopId；包内 url 不拼 query，data={shopId}。"""
+    sid = str(shop_id or SHOP_ID)
+    try:
+        ts = int(time.time() * 1000)
+        params = {"shopId": sid}
+        sign, _ = compute_sign(params, ts, is_post=False)
+        # 与包内一致：path 不带 query，query 与签名字段同源
+        url = path if path.startswith("http") else f"{BASE_URL}{path}"
+        # 仍带上 query，便于网关识别；签名用同一 shopId
+        sep = "&" if "?" in url else "?"
+        url_q = f"{url}{sep}shopId={sid}"
+        r = http("GET", url_q, headers=common_headers(token, sign=sign, ts=str(ts)))
+        try:
+            data = r.json()
+        except Exception:
+            data = {"success": False, "msg": clean_line(r.text)[:80]}
+        return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
+    except Exception as e:
+        msg = clean_line(e) or str(e)
+        kind = "网络不可达"
+        if re.search(r"ssl|certificate", msg, re.I):
+            kind = "HTTPS异常"
+        elif re.search(r"timeout|timed out", msg, re.I):
+            kind = "请求超时"
+        return {"success": False, "msg": f"{kind}: {msg[:80]}"}
+
+
+def api_post(path: str, token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """POST：body 与签名 JSON 完全一致。"""
+    try:
+        url = path if path.startswith("http") else f"{BASE_URL}{path}"
+        ts = int(time.time() * 1000)
+        sign, body_str = compute_sign(payload or {}, ts, is_post=True)
+        headers = common_headers(token, sign=sign, ts=str(ts))
+        r = http("POST", url, headers=headers, data=body_str.encode("utf-8"))
+        try:
+            data = r.json()
+        except Exception:
+            data = {"success": False, "msg": clean_line(r.text)[:80]}
+        return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
+    except Exception as e:
+        msg = clean_line(e) or str(e)
+        return {"success": False, "msg": f"请求失败: {msg[:80]}"}
+
+
+def token_valid(token: str, shop_id: str = "") -> bool:
+    resp = api_get("/mobile/customer/initMy", token, shop_id)
+    return is_ok(resp)
+
+
+def login_by_code(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    print("🔐 使用 code 登录")
+    code = get_wx_code(openid)
+    print(f"ℹ️ 取码结果 code={'有' if code else '无'}")
+    payload = {
+        "code": code,
+        "appid": APPID,
+        "shopId": SHOP_ID,
+        "envVersion": "",
+        "isEnterpriseWx": False,
+        "scene": "",
+        "referrerInfo": "",
+    }
+    data = api_post("/mobile/wxAppLogin", "", payload)
+    token = extract_token(data)
+    code_v = data.get("code") if data.get("code") is not None else ""
+    print(
+        f"ℹ️ 登录响应 success={data.get('success')} code={code_v} "
+        f"msg={clean_line(data.get('msg') or data.get('message') or '')[:50] or ('ok' if token else '无')}"
+    )
+    if not token:
+        return None, {"message": clean_line(data.get("msg") or "登录响应未返回 mobileToken")}
+    return token, data
+
+
 def cache_path() -> Path:
     configured = os.getenv("TEBU_TOKEN_DIR", "").strip()
     if configured:
@@ -348,60 +435,31 @@ def api_post(url: str, token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "msg": f"{kind}: {msg[:80]}"}
 
 
-def token_valid(token: str) -> bool:
-    resp = api_get(f"{USER_INFO_URL}?shopId={SHOP_ID}", token)
-    return is_ok(resp)
-
-
-def login_by_code(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
-    print("🔐 使用 code 登录")
-    code = get_wx_code(openid)
-    print(f"ℹ️ 取码结果 code={'有' if code else '无'}")
-    payload = {
-        "code": code,
-        "appid": APPID,
-        "shopId": SHOP_ID,
-        "envVersion": "",
-        "isEnterpriseWx": False,
-        "scene": "",
-        "referrerInfo": "",
-    }
-    data = api_post(LOGIN_URL, "", payload)
-    token = extract_token(data)
-    code = data.get("code") if data.get("code") is not None else ""
-    print(
-        f"ℹ️ 登录响应 success={data.get('success')} code={code} "
-        f"msg={clean_line(data.get('msg') or data.get('message') or '')[:50] or ('ok' if token else '无')}"
-    )
-    if not token:
-        return None, {"message": err_msg(data) or "登录响应未返回 mobileToken"}
-    return token, data
-
-
-def login_with_cache(openid: str) -> Tuple[Optional[str], str]:
+def login_with_cache(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     cached = read_cached_token(openid)
     if cached:
         print("ℹ️ token缓存登录")
-        if token_valid(cached):
-            return cached, "token缓存登录"
+        if token_valid(cached, SHOP_ID):
+            return cached, {"shopId": SHOP_ID}
         print("⚠️ 缓存 token 失效，自动删除并 code 重登")
         clear_cached_token(openid)
         token, raw = login_by_code(openid)
         if token:
             write_cached_token(openid, token, raw or {})
-            return token, "缓存失效 code重登"
-        return None, "缓存失效 code重登失败"
+            return token, raw or {}
+        return None, {}
     token, raw = login_by_code(openid)
     if token:
         write_cached_token(openid, token, raw or {})
-        return token, "code登录"
-    return None, "code登录失败"
+        return token, raw or {}
+    return None, {}
 
 
-def query_user(token: str) -> Tuple[str, str]:
+def query_user(token: str, shop_id: str = "") -> Tuple[str, str]:
     """返回 (显示名, 脱敏手机)"""
-    resp = api_get(f"{USER_INFO_URL}?shopId={SHOP_ID}", token)
+    resp = api_get("/mobile/customer/initMy", token, shop_id)
     if not is_ok(resp):
+        say(f"⚠️ 用户信息: {err_msg(resp)}")
         return "未知用户", ""
     customer = (resp.get("result") or {}).get("customer") or {}
     name = str(customer.get("customerName") or "未知用户")
@@ -409,8 +467,8 @@ def query_user(token: str) -> Tuple[str, str]:
     return name, mobile
 
 
-def get_activity_id(token: str) -> str:
-    resp = api_get(f"{TEMPLATE_URL}?shopId={SHOP_ID}", token)
+def get_activity_id(token: str, shop_id: str = "") -> str:
+    resp = api_get("/mobile/customer/queryMobilePersonCenterTemplateByShopId", token, shop_id)
     if not is_ok(resp):
         say(f"⚠️ 获取模板失败: {err_msg(resp)}")
         return ""
@@ -435,8 +493,8 @@ def get_activity_id(token: str) -> str:
     return ""
 
 
-def query_points(token: str) -> str:
-    resp = api_get(f"{POINT_URL}?shopId={SHOP_ID}", token)
+def query_points(token: str, shop_id: str = "") -> str:
+    resp = api_get("/mobile/customer/getMyAllPoint", token, shop_id)
     if not is_ok(resp):
         return err_msg(resp) or "-"
     rows = resp.get("result") or []
@@ -445,16 +503,17 @@ def query_points(token: str) -> str:
     return "-"
 
 
-def do_sign(token: str) -> Tuple[bool, str, Optional[float]]:
-    activity_id = get_activity_id(token)
+def do_sign(token: str, shop_id: str = "") -> Tuple[bool, str, Optional[float]]:
+    activity_id = get_activity_id(token, shop_id)
     if not activity_id:
         return False, "未获取到 activityId ❌", None
+    sid = str(shop_id or SHOP_ID)
     payload = {
-        "shopId": SHOP_ID,
+        "shopId": sid,
         "activityId": activity_id,
         "signDate": datetime.now().strftime("%Y-%m-%d"),
     }
-    resp = api_post(SIGN_URL, token, payload)
+    resp = api_post("/mobile/activity/sign/sign", token, payload)
     msg = err_msg(resp)
     print(f"ℹ️ 签到响应 success={resp.get('success')} msg={msg[:60] or 'ok'}")
     if is_ok(resp):
@@ -482,33 +541,41 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
     }
     print(f"━━━━━━━━━━━━━━━━━━━━\n👤 账号 {index}/{total} {mask_id(openid, 6)}\n━━━━━━━━━━━━━━━━━━━━")
 
-    try:
-        token, mode = login_with_cache(openid)
+    def _biz(token: str, raw: Dict[str, Any], mode: str) -> Dict[str, Any]:
         extras.append(mode)
-        if not token:
-            acc["status"] = "登录失败 ❌"
-            acc["error"] = "登录失败"
-            return acc
+        shop_id = extract_shop_id(raw)
+        extras.append(f"shopId {shop_id}")
         say(f"✅ 登录成功 token={mask_token(token)}")
-        name, mobile = query_user(token)
+        name, mobile = query_user(token, shop_id)
         acc["account"] = name or acc["account"]
         acc["phone"] = mobile
         extras.append(f"用户 {name} {mask_phone(mobile) if mobile else '-'}")
-
         time.sleep(1)
-        ok, status, gain = do_sign(token)
+        ok, status, gain = do_sign(token, shop_id)
         acc["status"] = status
         acc["success"] = ok
         time.sleep(1)
-        points = query_points(token)
+        points = query_points(token, shop_id)
         extras.append(f"当前积分 {points}")
         if gain is not None:
             acc["reward"] = f"+{gain:g} 积分"
-        elif points not in ("-", "", None):
+        elif points not in ("-", "", None) and "失败" not in str(points) and "授权" not in str(points):
             acc["reward"] = f"积分 {points}"
         if not ok:
             acc["error"] = status
         return acc
+
+    def _fail(msg: str, status: str) -> Dict[str, Any]:
+        acc["status"] = status
+        acc["error"] = msg
+        acc["success"] = False
+        return acc
+
+    try:
+        token, raw = login_with_cache(openid)
+        if not token:
+            return _fail("登录失败", "登录失败 ❌")
+        return _biz(token, raw or {}, "code登录")
     except Exception as e:
         msg = clean_line(e)
         say(f"❌ {msg}")
@@ -517,28 +584,14 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
             extras.append("登录态失效 code重登")
             try:
                 clear_cached_token(openid)
-                token, mode = login_with_cache(openid)
-                extras.append(mode)
+                token, raw = login_with_cache(openid)
                 if not token:
-                    acc["status"] = "重登失败 ❌"
-                    acc["error"] = "重登失败"
-                    return acc
-                ok, status, gain = do_sign(token)
-                acc["status"] = status
-                acc["success"] = ok
-                points = query_points(token)
-                extras.append(f"当前积分 {points}")
-                if gain is not None:
-                    acc["reward"] = f"+{gain:g} 积分"
-                return acc
+                    return _fail("重登失败", "重登失败 ❌")
+                return _biz(token, raw or {}, "缓存失效 code重登")
             except Exception as e2:
                 msg2 = clean_line(e2)
-                acc["status"] = f"重登重跑失败 ❌ ({msg2[:40]})"
-                acc["error"] = msg2
-                return acc
-        acc["status"] = f"失败 ❌ ({msg[:40]})"
-        acc["error"] = msg
-        return acc
+                return _fail(msg2, f"重登重跑失败 ❌ ({msg2[:40]})")
+        return _fail(msg, f"失败 ❌ ({msg[:40]})")
 
 
 def main() -> int:
