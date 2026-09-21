@@ -2,70 +2,91 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
-# @Description: 翼支付(电信 bestpay) - 小程序签到专区/绿色能量（smallcat 换 code）
+# @Author: onijiang0
+# @Date: 2026.09.21
+# @Description: 翼支付(电信 bestpay) - 签到专区 authTokenLogin + SignInService.signIn
 # cron: 22 15 * * *
+# #定时使用10-19点 随机时间 每天
 # ------------------------------------------
 # 变量名：yzf
-# 变量值：wx_server 里的 openid，多账号用 & 或换行分隔（可加 #备注）
+# 变量值：wx_server openid，多账号换行或 &，可加 #备注
 #
 # 依赖变量：
-# wx_server_url    必填，wx_server 地址（勿写进仓库）
-# wx_auth          必填，wx_server 鉴权值（/wx/code、/wx/getphonenumber 用）
-# yzf_appid        可选，默认 wx1c4a70bbdfaa2029
-# YZF_SECRET       必填，spanner 签名密钥（勿写进仓库）
-# YZF_MGSSDK       可选，mgssdk.dec.js 绝对路径
-# YZF_IPTID / YZF_IPRID  可选
-# YZF_SESSION      可选，登录失败时仅查询的 sessionKey
-# QL_NOTIFY        可选，设为 0 关闭推送
+# wx_server_url    必填，取码地址（勿写进仓库）
+# wx_auth          必填，取码鉴权
+# yzf_phone        选填，翼支付手机号/productNo（查积分需要）
+# YZF_SESSION      选填，登录失败时仅查询用 sessionKey
+# yzf_appid        选填，默认 wx1c4a70bbdfaa2029
+# YZF_SECRET       选填，网关签名密钥（默认读脚本/客户端内平台参数）
+# QL_NOTIFY        选填，0 关闭推送
+# ------------------------------------------
+# 已实现：
+# 1. 多账号；缺变量报错；单号失败不中断；不缓存 token
+# 2. code/手机号凭证 → authTokenLogin（抓包唯一登录入口）
+# 3. 签到链：signNewSwitch → querySignInConfigInfo → querySignInDateList
+#          → SignInService.signIn → querySignInDateList 复核
+# 4. send_notify 统一简报；openid/session 脱敏
 #
-# 契约（appid wx1c4a70bbdfaa2029 / 网关 appid FC1902C211615）：
-# smallcat  POST {wx_server_url}/wx/getphonenumber  auth:{wx_auth} json:{openid,appid}
-#           -> data.code + data.raw{encryptedData,iv,data.mobile}
-# smallcat  POST {wx_server_url}/wx/code  auth:{wx_auth} json:{openid,appid}
-#           -> data.code（wx.login code）
-# 登录      spanner MGS:
-#           com.bestpay.mobile.service.account.prd.event.AppletAuthorizeEvent.appletAuthorizeLogin
-#           com.bestpay.mobile.service.account.prd.event.AppletAuthorizeEvent.authorizeCodeAuth
-#           （td 头：tntId=0108 arNo=8901011101110001 pdPath=appletAuthorize pdCd=01110110）
-#           需手机号凭证 + 授权来源appId + 授权id + 业务渠道 + 授权来源
+# 契约（appid wx1c4a70bbdfaa2029 / 网关 FC1902C211615）：
+# code     POST {wx_server_url}/wx/code /wx/getphonenumber
 # 网关      POST https://spanner.bestpay.com.cn:10081
-# 签名      md5(secretKey & Operation-Type=...&Request-Data=base64(JSON.stringify([data]))&Ts=...)
-# 加密      encryptType=2，由 yzf_mgs_client.js + mgssdk WASM 完成
-# 进页自动签：signNewSwitch + queryPageConfig + queryRedbagList 等
+# 登录      com.bestpay.mbp.customer.facade.LoginFacade.authTokenLogin
+#           event-context: tntId=0108 arNo=8901011101110001
+#                         pdPath=appletAuthorize pdCd=01110110
+# 门店回填  getIpRidAndIpTidByPhone
+# 签到页    origin=https://render.bestpay.cn tntId=0101 env=PRD
+# 签到      SignInService.signIn（2026-09-21 抓包实锤）
+# 签名      md5(secretKey&Operation-Type=..&Request-Data=b64([data])&Ts=..)
+# 加密      encryptType=2 + mgssdk（yzf_mgs_client.js）
+# 判定      result-status 1000 成功 / 2000 session 过期
+# 平台常量  ipTId=890120031556467340724507
+#           ipRId签到=890110031555074150724502
+#           ipRId商城=890810000365879820724509
+#           authssucode登录=8901010699000117
+#
+# 踩坑：
+# 1. 旧脚本猜的 appletAuthorizeLogin 抓包未出现；真实登录是 authTokenLogin
+# 2. 签到必须调 SignInService.signIn，只查日历不会真签
+# 3. sessionkey 过期 result-status=2000；可配 YZF_SESSION 仅查询
+# 4. openid/session 只进环境变量；网关 appid/ipRId 等平台参数写默认值
+# 5. 推送用 notify_and_format(title=, start_ts=)，勿传不存在的 cost_s
 # ------------------------------------------
 # */
 
 from __future__ import annotations
 
 import json
-import logging
 import os
 import random
+import re
 import subprocess
 import sys
 import time
 from typing import Any, Dict, List
 
 try:
-    from send_notify import send_notify
+    from send_notify import notify_and_format, format_report
 except Exception:
-    send_notify = None
+    def format_report(task, accounts, push_result="", cost_s=None):
+        return task
 
-logging.basicConfig(
-    level=logging.DEBUG if os.getenv("yzf_debug") else logging.WARNING,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
-log = logging.getLogger("YZF")
+    def notify_and_format(task, accounts, **kwargs):
+        print("🔔 推送结果：跳过（send_notify 不可用）")
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 APP_NAME = "翼支付"
 APPID = (os.getenv("yzf_appid") or "wx1c4a70bbdfaa2029").strip()
 UA = (
     "Mozilla/5.0 (Linux; Android 17; 2509FPN0BC Build/CP2A.260605.016) "
-    "AppleWebKit/537.36 MicroMessenger/8.0.76 miniProgram/wx1c4a70bbdfaa2029"
+    f"AppleWebKit/537.36 MicroMessenger/8.0.76 miniProgram/{APPID}"
 )
 
 
-def _env_lines(name: str) -> list[str]:
+def _env_lines(name: str) -> List[str]:
     raw = os.environ.get(name, "") or ""
     out = []
     for part in raw.replace("&", "\n").splitlines():
@@ -105,7 +126,7 @@ def sc_post(base: str, auth: str, path: str, body: dict) -> dict:
 
 
 def smallcat_material(openid: str) -> dict:
-    """每 openid 每次运行只调 1 次 /wx/code；getphonenumber 按需。"""
+    """每次运行每 openid 只调 1 次 /wx/code。"""
     base = os.getenv("wx_server_url", "").strip().rstrip("/")
     auth = os.getenv("wx_auth", "").strip()
     if not base or not auth:
@@ -123,13 +144,11 @@ def smallcat_material(openid: str) -> dict:
     if isinstance(raw_data, dict):
         mobile = raw_data.get("mobile") or raw_data.get("purePhoneNumber") or ""
     if not mobile:
-        mobile = raw.get("mobile") or data_ph.get("mobile") or ""
-    time.sleep(1)
+        mobile = raw.get("mobile") or data_ph.get("mobile") or os.getenv("yzf_phone", "")
+    time.sleep(0.5)
     cr = sc_post(base, auth, "/wx/code", {"openid": openid, "appid": APPID})
     code = ((cr.get("data") or {}).get("code") or "").strip()
     phone_code = (data_ph.get("code") or "").strip()
-    if not code and not phone_code:
-        raise RuntimeError(f"/wx/code 失败: {cr.get('message') or '无 code'}")
     return {
         "openid": openid,
         "appid": APPID,
@@ -138,7 +157,6 @@ def smallcat_material(openid: str) -> dict:
         "encryptedData": raw.get("encryptedData") or "",
         "iv": raw.get("iv") or "",
         "mobile": mobile,
-        "cloudId": raw.get("cloud_id") or "",
     }
 
 
@@ -153,11 +171,9 @@ def run_node(payload: dict) -> dict:
     node = os.environ.get("node") or os.environ.get("NODE") or "node"
     env = os.environ.copy()
     env["YZF_PAYLOAD"] = json.dumps(payload, ensure_ascii=False)
-    # login mode when smallcat material present
-    if payload.get("wxCode") or payload.get("phoneCode"):
-        env["YZF_LOGIN"] = "1"
     if payload.get("sessionKey"):
         env["yzf"] = payload["sessionKey"]
+        env["YZF_SESSION"] = payload["sessionKey"]
     try:
         proc = subprocess.run(
             [node, js],
@@ -183,8 +199,11 @@ def run_node(payload: dict) -> dict:
                 pass
         elif line.strip():
             lines.append(line.strip())
+    ok = proc.returncode == 0 and (data is not None or any("签到" in x or "✅" in x for x in lines))
+    if isinstance(data, dict) and data.get("ok") is False:
+        ok = False
     return {
-        "ok": proc.returncode == 0 and (data is not None or any("✅" in x for x in lines)),
+        "ok": ok,
         "code": proc.returncode,
         "lines": lines,
         "data": data or {},
@@ -192,85 +211,121 @@ def run_node(payload: dict) -> dict:
     }
 
 
+def mask_id(value: Any, keep: int = 6) -> str:
+    s = str(value or "")
+    return (s[:keep] + "***") if len(s) > keep else (s or "-")
+
+
+def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
+    extras: List[str] = [f"openid：{mask_id(openid, 6)}"]
+    acc: Dict[str, Any] = {
+        "account": f"账号{index}",
+        "phone": "",
+        "status": "-",
+        "reward": "-",
+        "extra": extras,
+        "error": "",
+        "success": False,
+    }
+    print(f"━━━━━━━━━━━━━━━━━━━━\n👤 账号 {index}/{total} {mask_id(openid, 6)}\n━━━━━━━━━━━━━━━━━━━━")
+    try:
+        material = smallcat_material(openid)
+        mobile = material.get("mobile") or os.getenv("yzf_phone", "")
+        acc["phone"] = mobile
+        extras.append(f"wxCode={'有' if material.get('wxCode') else '无'} phoneCode={'有' if material.get('phoneCode') else '无'}")
+        print("🔐 使用 code 登录（authTokenLogin）")
+        res = run_node(material)
+        if (not res.get("ok")) or str(res.get("data", {}).get("signInRs", "")).startswith("2000"):
+            session_fallback = os.getenv("YZF_SESSION", "").strip()
+            if session_fallback:
+                print("ℹ️ 登录未得到有效 session，回退 YZF_SESSION 查询/签到")
+                extras.append("回退 YZF_SESSION")
+                res = run_node({"sessionKey": session_fallback, "productNo": mobile})
+    except Exception as e:
+        msg = str(e)[:80]
+        acc["status"] = f"失败 ❌ ({msg[:40]})"
+        acc["error"] = msg
+        print(f"❌ {msg}")
+        return acc
+
+    data = res.get("data") or {}
+    body_lines = [x for x in (res.get("lines") or []) if x and not str(x).startswith("{")]
+    for line in body_lines[:8]:
+        print(f"ℹ️ {line[:120]}")
+        extras.append(line[:80])
+
+    sign_rs = str(data.get("signInRs") or "")
+    if data.get("sessionExpired") or sign_rs.startswith("2000"):
+        acc["status"] = "session 过期 ❌"
+        acc["error"] = "result-status=2000 登录超时，更新 YZF_SESSION 后重试"
+        print("⚠️ result-status=2000：sessionKey 过期，请刷新环境变量 YZF_SESSION")
+        return acc
+
+    sign_body = data.get("signIn")
+    if sign_rs.startswith("1000") or (isinstance(sign_body, dict) and sign_body):
+        acc["success"] = True
+        acc["status"] = "签到完成 ✅"
+        reward = "-"
+        if isinstance(sign_body, dict):
+            for k in ("integral", "points", "score", "amount", "redbagAmount"):
+                if sign_body.get(k) not in (None, "", 0, "0"):
+                    reward = f"{k}+{sign_body.get(k)}"
+                    break
+            msg = sign_body.get("msg") or sign_body.get("memo") or ""
+            if msg and reward == "-":
+                reward = str(msg)[:30]
+        bag = data.get("redbag") if isinstance(data.get("redbag"), dict) else {}
+        if bag.get("receivedRedbags") is not None:
+            extras.append(f"红包已领{bag.get('receivedRedbags')}/{bag.get('redbagTotal')}")
+        acc["reward"] = reward
+        print(f"✅ 签到完成 {reward}")
+        return acc
+
+    if res.get("ok"):
+        acc["success"] = True
+        acc["status"] = "查询完成 ✅"
+        acc["reward"] = "-"
+        return acc
+
+    err = res.get("err") or (body_lines[0] if body_lines else "未知错误")
+    acc["status"] = f"失败 ❌ ({str(err)[:40]})"
+    acc["error"] = str(err)[:80]
+    print(f"❌ {acc['status']}")
+    return acc
+
+
 def main() -> int:
     started = time.time()
     accounts_raw = _env_lines("yzf")
     if not accounts_raw:
-        print("未配置 yzf（wx_server openid）")
+        print("❌ 未配置 yzf 环境变量（openid，多账号换行或 &）")
         return 1
+    print(
+        f"==============================\n"
+        f"🛒 任务名称：{APP_NAME}签到专区\n"
+        f"📌 登录 authTokenLogin / 签到 SignInService.signIn\n"
+        f"------------------------------"
+    )
     accounts: List[Dict[str, Any]] = []
-    ok_n = 0
-    for i, openid in enumerate(accounts_raw):
-        name = f"账号{i + 1}"
-        acc: Dict[str, Any] = {
-            "account": name,
-            "phone": "",
-            "status": "-",
-            "reward": "-",
-            "extra": [f"openid {openid[:12]}…"],
-            "error": "",
-            "success": False,
-        }
-        try:
-            material = smallcat_material(openid)
-            mobile = material.get("mobile") or ""
-            acc["phone"] = mobile
-            acc["extra"].append(
-                f"wxCode={'有' if material.get('wxCode') else '无'} "
-                f"phoneCode={'有' if material.get('phoneCode') else '无'}"
-            )
-        except Exception as e:
-            acc["status"] = f"smallcat 失败 ❌ ({str(e)[:50]})"
-            acc["error"] = str(e)[:80]
-            accounts.append(acc)
-            continue
-        res = run_node(material)
-        session_fallback = os.getenv("YZF_SESSION", "").strip()
-        if (not res.get("ok")) and session_fallback:
-            acc["extra"].append("登录未成功，回退 YZF_SESSION 查询")
-            res = run_node({"sessionKey": session_fallback, "productNo": os.getenv("yzf_phone", "")})
-        if res.get("ok"):
-            ok_n += 1
-            acc["success"] = True
-            acc["status"] = "登录/查询完成 ✅"
-            data = res.get("data") or {}
-            if data.get("sessionKey"):
-                acc["extra"].append("已获 session")
-            body_lines = [x for x in (res.get("lines") or []) if x and not str(x).startswith("{") and "session" not in x.lower()]
-            acc["extra"].extend(body_lines[:6])
-        else:
-            err = res.get("err") or "\n".join((res.get("lines") or [])[:3]) or "未知错误"
-            acc["status"] = f"失败 ❌ ({str(err)[:50]})"
-            acc["error"] = str(err)[:80]
-        accounts.append(acc)
-        if i < len(accounts_raw) - 1:
-            time.sleep(random.randint(8, 20))
-
+    for i, openid in enumerate(accounts_raw, 1):
+        accounts.append(run_account(openid, i, len(accounts_raw)))
+        if i < len(accounts_raw):
+            time.sleep(random.randint(5, 12))
+    ok_n = sum(1 for a in accounts if a.get("success"))
+    print("------------------------------")
+    for a in accounts:
+        mark = "✅" if a.get("success") else "❌"
+        print(f"{mark} {a.get('account')} | {a.get('status')} | {a.get('reward')}")
+    print(f"------------------------------\n📊 成功 {ok_n}/{len(accounts_raw)}\n==============================")
     try:
-        from send_notify import notify_and_format
-
         notify_and_format(
-            "翼支付签到专区",
+            f"{APP_NAME}签到专区",
             accounts,
-            title=f"翼支付签到专区 {ok_n}/{len(accounts_raw)}",
+            title=f"{APP_NAME}签到专区 {ok_n}/{len(accounts_raw)}",
             start_ts=started,
         )
     except Exception:
-        try:
-            from send_notify import format_report, send_notify
-
-            body = format_report(
-                "翼支付签到专区",
-                accounts,
-                push_result="",
-                cost_s=time.time() - started,
-            )
-            pr = send_notify(f"翼支付签到专区 {ok_n}/{len(accounts_raw)}", body)
-            print(format_report("翼支付签到专区", accounts, push_result=pr, cost_s=time.time() - started))
-        except Exception as ne:
-            print("[notify] 跳过:", ne)
-            for a in accounts:
-                print(f"{'✅' if a.get('success') else '❌'} [{a.get('account')}] {a.get('status')}")
+        print(format_report(f"{APP_NAME}签到专区", accounts, push_result="推送模块异常", cost_s=time.time() - started))
     return 0 if ok_n == len(accounts_raw) else 1
 
 

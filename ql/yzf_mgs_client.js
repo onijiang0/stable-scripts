@@ -32,6 +32,8 @@ const OPS = {
   querySignInConfigInfo: "com.bestpay.redbag.product.api.y2022.signIn.service.SignInService.querySignInConfigInfo",
   querySignInDateList: "com.bestpay.redbag.product.api.y2022.signIn.service.SignInService.querySignInDateList",
   queryUserSignInAwardRecord: "com.bestpay.redbag.product.api.signin.SignInService.queryUserSignInAwardRecord",
+  // 抓包 2026-09-21：真正签到接口
+  signIn: "com.bestpay.redbag.product.api.y2022.signIn.service.SignInService.signIn",
   greenEnergyHomePage: "com.bestpay.marketingadapter.api.y2025.score.market.ScoreMarketService.greenEnergyHomePage",
   queryMarketScore: "com.bestpay.marketingadapter.api.y2025.score.market.ScoreMarketService.queryMarketScore",
   queryScoresList: "com.bestpay.marketingadapter.api.y2025.score.market.ScoreMarketService.queryScoresList",
@@ -40,7 +42,17 @@ const OPS = {
   queryMarketProductList: "com.bestpay.marketingadapter.api.y2025.score.market.ScoreMarketService.queryMarketProductList",
   getDynamicScore: "com.bestpay.marketingadapter.api.y2025.score.market.ScoreMarketService.getDynamicScore",
   starReceiveQuery: "com.bestpay.marketingadapter.api.y2025.score.market.ScoreMarketService.starReceiveQuery",
+  queryUserInfo: "com.bestpay.mbp.customer.facade.UserInfoFacade.queryUserInfo",
+  getIpRid: "com.bestpay.bestpaymall.bffmallcli.api.mlogin.service.MloginService.getIpRidAndIpTidByPhone",
+  newQueryTheMonthTaskList: "com.bestpay.marketingadapter.api.y2024.mission.MissionService.newQueryTheMonthTaskList",
 };
+
+// 抓包回填的平台常量（非账号）
+const DEFAULT_IPTID = process.env.YZF_IPTID || "890120031556467340724507";
+const DEFAULT_IPRID_SIGN = process.env.YZF_IPRID || "890110031555074150724502";
+const DEFAULT_IPRID_MALL = process.env.YZF_IPRID_MALL || "890810000365879820724509";
+const SSU_LOGIN = "8901010699000117";
+const SSU_GUEST = "8901010699000045";
 
 function loadMP() {
   setupEnv();
@@ -271,29 +283,78 @@ function unwrap(body) {
   return body.data !== undefined ? body.data : body;
 }
 
-async function dailyCheck({ sessionKey, productNo, ipTId, ipRId, sdkPath }) {
-  const client = createClient({ sessionKey, ipTId, ipRId, sdkPath });
+async function dailyCheck({ sessionKey, productNo, ipTId, ipRId, sdkPath, doLoginFirst }) {
+  const client = createClient({
+    sessionKey,
+    ipTId: ipTId || DEFAULT_IPTID,
+    ipRId: ipRId || DEFAULT_IPRID_SIGN,
+    sdkPath,
+  });
   const lines = [];
   const data = {};
-  const opts = { withUser: !!productNo, productNo };
+  const optsUser = {
+    withUser: !!productNo,
+    productNo,
+    tnt: "0101",
+    env: "PRD",
+    extraHeaders: { origin: "https://render.bestpay.cn" },
+    eventOverride: {
+      env: "PRD",
+      tntId: "0101",
+      ipTId: DEFAULT_IPTID,
+      ipRId: DEFAULT_IPRID_SIGN,
+    },
+  };
 
-  const sw = await client.call(OPS.signNewSwitch, {}, opts);
+  // 抓包序列（render.bestpay.cn / tntId=0101）
+  const sw = await client.call(OPS.signNewSwitch, {}, optsUser);
   const swU = unwrap(sw.body);
   data.signNewSwitch = swU;
-  lines.push("签到开关: " + JSON.stringify(swU));
+  data.signRs = sw.resultStatus;
+  lines.push("签到开关: " + JSON.stringify(swU) + " rs=" + sw.resultStatus);
 
-  const geo = await client.call(OPS.greenEnergyHomePage, {}, opts);
-  const geoU = unwrap(geo.body) || {};
-  data.greenEnergy = geoU;
-  const act = geoU.integralActivityNo || "";
-  const mall = geoU.marketActivityNo || "";
-  lines.push("活动号: " + (act || "-") + " / " + (mall || "-"));
+  if (String(sw.resultStatus || "").startsWith("2000")) {
+    lines.push("session 过期(result-status=2000)，需刷新 YZF_SESSION");
+    data.sessionExpired = true;
+    return { lines, data, ok: false };
+  }
 
-  const page = await client.call(OPS.queryPageConfig, {}, opts);
-  data.pageConfig = unwrap(page.body);
-  lines.push("页配置: " + JSON.stringify(data.pageConfig));
+  const cfg = await client.call(OPS.querySignInConfigInfo, {}, optsUser);
+  data.signInConfig = unwrap(cfg.body);
+  lines.push("签到配置 rs=" + cfg.resultStatus);
 
-  const bag = await client.call(OPS.queryRedbagList, {}, opts);
+  const list = await client.call(OPS.querySignInDateList, {}, optsUser);
+  data.signInDates = unwrap(list.body);
+  lines.push("签到日历 rs=" + list.resultStatus);
+
+  // 真正签到
+  const act =
+    (data.signInConfig &&
+      (data.signInConfig.activityId ||
+        data.signInConfig.activityNo ||
+        data.signInConfig.signInActivityId)) ||
+    (data.signInDates &&
+      (data.signInDates.activityId || data.signInDates.activityNo)) ||
+    "";
+  const signPayload = act
+    ? { activityId: act, activityNo: act, signDate: new Date().toISOString().slice(0, 10) }
+    : {};
+  const sign = await client.call(OPS.signIn, signPayload, optsUser);
+  data.signIn = unwrap(sign.body);
+  data.signInRs = sign.resultStatus;
+  const signMemo =
+    (data.signIn && (data.signIn.memo || data.signIn.msg || data.signIn.errorMsg)) || "";
+  if (String(sign.resultStatus || "").startsWith("1000")) {
+    lines.push("签到接口: 成功" + (signMemo ? " " + String(signMemo).slice(0, 40) : ""));
+  } else {
+    lines.push("签到接口: rs=" + sign.resultStatus + (signMemo ? " " + signMemo.slice(0, 40) : ""));
+  }
+
+  const list2 = await client.call(OPS.querySignInDateList, {}, optsUser);
+  data.signInDatesAfter = unwrap(list2.body);
+  lines.push("签到复核 rs=" + list2.resultStatus);
+
+  const bag = await client.call(OPS.queryRedbagList, {}, optsUser);
   const bagU = unwrap(bag.body) || {};
   data.redbag = bagU;
   lines.push(
@@ -303,21 +364,26 @@ async function dailyCheck({ sessionKey, productNo, ipTId, ipRId, sdkPath }) {
       (bagU.redbagTotal != null ? bagU.redbagTotal : "?")
   );
 
-  if (act) {
+  const geo = await client.call(OPS.greenEnergyHomePage, {}, optsUser);
+  const geoU = unwrap(geo.body) || {};
+  data.greenEnergy = geoU;
+  const actScore = geoU.integralActivityNo || geoU.marketActivityNo || "";
+  lines.push("能量/活动号: " + (actScore || "-"));
+  if (productNo && actScore) {
     const score = await client.call(
       OPS.queryMarketScore,
-      { integralActivityNo: act, activityNo: act },
-      opts
+      { integralActivityNo: actScore, activityNo: actScore, productNo },
+      optsUser
     );
-    lines.push("积分已查询");
     data.score = unwrap(score.body);
+    lines.push("积分 rs=" + score.resultStatus);
   }
 
-  const ship = await client.call(OPS.queryBestpayUserShip, {}, opts);
+  const ship = await client.call(OPS.queryBestpayUserShip, {}, optsUser);
   data.vip = unwrap(ship.body);
-  lines.push("会员已查询");
-
-  return { lines, data };
+  lines.push("会员 rs=" + ship.resultStatus);
+  data.ok = String(sw.resultStatus || "").startsWith("1000") || String(sign.resultStatus || "").startsWith("1000");
+  return { lines, data, ok: data.ok };
 }
 
 const LOGIN_OPS = {
@@ -361,10 +427,62 @@ async function tryLogin(client, mat) {
     sessionKey: mat.sessionKey || "",
     tnt: "0108",
     env: "",
+    extraHeaders: { origin: "https://h5.bestpay.cn" },
     eventOverride: loginEventCtx(),
   };
 
-  // 1) authorizeCodeAuth — 实测可返回 openId/unionId
+  // 抓包 2026-09-21：真实登录入口是 LoginFacade.authTokenLogin（body 加密，无 appletAuthorizeLogin）
+  const authVariants = [
+    baseData({
+      code,
+      wxCode: code,
+      loginCode: code,
+      phoneCode,
+      encryptedData: mat.encryptedData || "",
+      iv: mat.iv || "",
+      productNo: mobile,
+      appId,
+      sourceAppId: appId,
+      openId: mat.openid || "",
+      authorizeId: mat.openid || "",
+      targetAppType: "117",
+      appType: 117,
+      partnerToken: code || phoneCode,
+      loginToken: code || phoneCode,
+      authSource: "appletAuthorize",
+      authorizeSource: "appletAuthorize",
+      businessChannel: "appletAuthorize",
+      channel: "appletAuthorize",
+      arNo: "8901011101110001",
+      pdPath: "appletAuthorize",
+      pdCd: "01110110",
+    }),
+  ];
+  for (let i = 0; i < authVariants.length; i++) {
+    try {
+      const r = await client.call(LOGIN_OPS.authTokenLogin, authVariants[i], loginOpts);
+      const body = unwrap(r.body);
+      const t = body && typeof body === "object" ? body.t || body.result || body : body;
+      const memo = (body && (body.memo || body.errorMsg || body.tips)) || "";
+      console.log("LOGIN authTokenLogin", i, r.resultStatus, String(memo || "ok").slice(0, 60));
+      const sk = t && (t.sessionKey || t.sk || t.sessionkey);
+      if (sk) {
+        return {
+          ok: true,
+          sessionKey: sk,
+          productNo: (t && (t.productNo || t.phoneNo)) || mobile,
+          openId: (t && (t.openId || t.openid)) || "",
+          unionId: (t && (t.unionId || t.unionid)) || "",
+          used: "authTokenLogin#" + i,
+          raw: body,
+        };
+      }
+    } catch (e) {
+      console.log("LOGIN authTokenLogin err", i, e.message);
+    }
+  }
+
+  // 1) authorizeCodeAuth — 历史探测可返回 openId/unionId（不一定给 sessionKey）
   const authCode = await client.call(
     LOGIN_OPS.authorizeCodeAuth,
     baseData({
@@ -543,7 +661,10 @@ async function runFromEnv() {
       console.log("bad YZF_PAYLOAD", e.message);
     }
   }
-  const sessionKey = payload.sessionKey || process.env.yzf || process.env.YZF_SESSION || "";
+  const sessionKey =
+    payload.sessionKey ||
+    process.env.YZF_SESSION ||
+    (/^[a-f0-9]{16,}$/i.test((process.env.yzf || "").trim()) ? process.env.yzf.trim() : "");
   const productNo = payload.mobile || payload.productNo || process.env.yzf_phone || process.env.YZF_PHONE || "";
 
   if (process.env.YZF_LOGIN === "1" || payload.wxCode || payload.phoneCode) {
@@ -552,8 +673,9 @@ async function runFromEnv() {
     if (!login.ok) {
       console.error(login.error || "login failed");
       if (login.openId) console.log("AUTH openId set", !!login.openId);
-      process.exit(1);
-    }
+      if (!sessionKey) process.exit(1);
+      console.log("LOGIN fail, fallback session from env");
+    } else {
     console.log(
       "LOGIN OK via " +
         login.used +
@@ -566,6 +688,7 @@ async function runFromEnv() {
     );
     payload.sessionKey = login.sessionKey;
     if (login.productNo) payload.mobile = login.productNo;
+    }
   }
 
   if (!payload.sessionKey && !sessionKey) {
