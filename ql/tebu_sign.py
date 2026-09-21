@@ -200,33 +200,6 @@ def extract_open_id(data: Any) -> str:
     return ""
 
 
-def api_get(path: str, token: str, shop_id: str = "") -> Dict[str, Any]:
-    """GET：先与包内一致 path+data(shopId) 签名；URL 拼 shopId 查询串。"""
-    sid = str(shop_id or SHOP_ID)
-    ts = int(time.time() * 1000)
-    params = {"shopId": sid}
-    sign, _ = compute_sign(params, ts, is_post=False)
-    url = path if path.startswith("http") else f"{BASE_URL}{path}"
-    sep = "&" if "?" in url else "?"
-    url_q = f"{url}{sep}shopId={sid}"
-    headers = common_headers(token, sign=sign, ts=str(ts), open_id=_LOGIN_OPENID)
-    try:
-        r = http("GET", url_q, headers=headers)
-        data = r.json() if r.content else {}
-        if not isinstance(data, dict):
-            data = {"success": False, "msg": clean_line(data)}
-        data["_http"] = r.status_code
-        return data
-    except Exception as e:
-        msg = clean_line(e) or str(e)
-        kind = "网络不可达"
-        if re.search(r"ssl|certificate", msg, re.I):
-            kind = "HTTPS异常"
-        elif re.search(r"timeout|timed out", msg, re.I):
-            kind = "请求超时"
-        return {"success": False, "msg": f"{kind}: {msg[:80]}"}
-
-
 def get_wx_code(openid: str) -> str:
     base = os.getenv("wx_server_url", "").strip().rstrip("/")
     auth = os.getenv("wx_auth", "").strip()
