@@ -534,71 +534,140 @@ def extract_session_cookie(activity_url: str, proxies=None) -> str:
             set_cookies = [merged]
     joined = "".join(set_cookies)
     parts = re.findall(r"(?:wdata4|w_ts|_ac|wdata3|dcustom)=[^;]*;", joined)
+    names = [p.split("=", 1)[0] for p in parts]
+    print(f"ℹ️ 活动 Cookie 片段 {len(parts)}/5 names={names}")
     if not parts:
         return ""
     return "".join(parts)
 
 
+def _node_path() -> Optional[str]:
+    for name in (os.environ.get("node") or "", "node", "nodejs"):
+        if not name:
+            continue
+        try:
+            r = subprocess.run([name, "-v"], capture_output=True, timeout=8, text=True)
+            if r.returncode == 0:
+                return name
+        except Exception:
+            continue
+    return None
+
+
 def eval_sign_token(raw_js: str) -> str:
     """执行混淆 JS 取 window['3fd0cbet']；失败则正则兜底。"""
     if not raw_js:
+        print("ℹ️ getToken 返回空 token 字段")
         return ""
+    print(f"ℹ️ getToken JS len={len(raw_js)} 前80={clean_line(raw_js[:80])}")
+    keys = re.findall(r"window\[['\"]([^'\"]+)['\"]\]", raw_js)
+    if keys:
+        print(f"ℹ️ JS 内 window 键名（去重前）={unique_sample(keys)}")
     fixed = re.sub(r"\b0([0-7]+)\b", r"0o\1", raw_js)
-    # Node 优先
-    try:
-        script = (
-            "var window={};try{eval(process.argv[1]);}catch(e){}"
-            f"process.stdout.write(String(window['{ACTIVITY_KEY}']||''));"
-        )
-        r = subprocess.run(
-            ["node", "-e", script, fixed],
-            capture_output=True,
-            timeout=20,
-            text=True,
-        )
-        val = (r.stdout or "").strip()
-        if val and val != "undefined":
-            return val
-    except Exception:
-        pass
-    try:
-        import execjs  # type: ignore
+    node = _node_path()
+    print(f"ℹ️ Node 运行时: {node or '未找到'}")
+    if node:
+        try:
+            # 用临时文件避免超长参数/转义问题
+            import tempfile
+            from pathlib import Path
 
-        ctx = execjs.compile("var window={};\n" + fixed)
-        val = ctx.eval(f"window['{ACTIVITY_KEY}']")
-        if val:
-            return str(val)
-    except Exception:
-        pass
-    m = re.search(rf"window\[['\"]{ACTIVITY_KEY}['\"]\]\s*=\s*['\"]([^'\"]+)['\"]", raw_js)
-    if m:
-        return m.group(1)
-    m2 = re.search(r"window\[['\"]([0-9a-zA-Z]{6,12})['\"]\]\s*=\s*['\"]([^'\"]+)['\"]", raw_js)
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as tf:
+                tf.write("var window={};\n")
+                tf.write(fixed)
+                tf.write(f"\nprocess.stdout.write(String(window[{json.dumps(ACTIVITY_KEY)}]||''));\n")
+                tmp = tf.name
+            try:
+                r = subprocess.run([node, tmp], capture_output=True, timeout=20, text=True)
+                val = (r.stdout or "").strip()
+                err = clean_line((r.stderr or "")[:120])
+                print(f"ℹ️ Node stdout len={len(val)} stderr={err or '无'}")
+                if val and val != "undefined":
+                    return val
+            finally:
+                try:
+                    Path(tmp).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"ℹ️ Node 执行异常: {clean_line(e)[:80]}")
+    else:
+        print("ℹ️ 无 Node，跳过 eval，改用正则")
+
+    for key in (ACTIVITY_KEY,):
+        m = re.search(rf"window\[['\"]{re.escape(key)}['\"]\]\s*=\s*['\"]([^'\"]+)['\"]", raw_js)
+        if m:
+            print(f"ℹ️ 正则命中键 {key}")
+            return m.group(1)
+    # eval 包装：window["x"]="v" 可能在字符串里
+    m3 = re.search(rf"['\"]{re.escape(ACTIVITY_KEY)}['\"]\]\s*=\s*['\"]([^'\"]+)['\"]", raw_js)
+    if m3:
+        print(f"ℹ️ 正则命中（宽松）{ACTIVITY_KEY}")
+        return m3.group(1)
+    m2 = re.findall(r"window\[['\"]([0-9a-zA-Z_]{4,20})['\"]\]\s*=\s*['\"]([^'\"]{4,})['\"]", raw_js)
     if m2:
-        return m2.group(2)
+        print(f"ℹ️ 正则候选项 window 键={ [k for k,_ in m2[:5]] }，取首个")
+        return m2[0][1]
+    print("ℹ️ 未能从 getToken 响应解析出签到 token")
     return ""
+
+
+def unique_sample(keys: List[str]) -> List[str]:
+    seen = []
+    for k in keys:
+        if k not in seen:
+            seen.append(k)
+        if len(seen) >= 6:
+            break
+    return seen
 
 
 def get_sign_token(session_cookie: str, proxies=None) -> str:
     ts = int(time.time() * 1000)
-    resp = http(
-        "POST",
-        ACTIVITY_TOKEN_URL,
-        headers={
-            "User-Agent": SIGN_UA,
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": "https://86019-activity.dexfu.cn",
-            "Referer": f"https://86019-activity.dexfu.cn/sign/component/page?signOperatingId={SIGN_OPERATING_ID}",
-            "Cookie": session_cookie,
-        },
-        data={"timestamp": ts},
-        proxies=proxies,
-    )
-    result = resp.json()
+    cookie_names = [p.split("=", 1)[0] for p in session_cookie.split(";") if "=" in p]
+    print(f"ℹ️ getToken 请求 Cookie 键={cookie_names}")
+    try:
+        resp = http(
+            "POST",
+            ACTIVITY_TOKEN_URL,
+            headers={
+                "User-Agent": SIGN_UA,
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://86019-activity.dexfu.cn",
+                "Referer": f"https://86019-activity.dexfu.cn/sign/component/page?signOperatingId={SIGN_OPERATING_ID}",
+                "Cookie": session_cookie,
+            },
+            data={"timestamp": ts},
+            proxies=proxies,
+        )
+    except Exception as e:
+        print(f"ℹ️ getToken 网络异常: {clean_line(e)[:80]}")
+        return ""
+    print(f"ℹ️ getToken HTTP={resp.status_code}")
+    try:
+        result = resp.json()
+    except Exception:
+        print(f"ℹ️ getToken 非 JSON 前80={clean_line(resp.text)[:80]}")
+        return ""
+    if not isinstance(result, dict):
+        print(f"ℹ️ getToken 结果类型={type(result).__name__}")
+        return ""
+    print(f"ℹ️ getToken keys={list(result.keys())[:10]} success={result.get('success')}")
     if not result.get("success"):
-        raise RuntimeError(clean_line(result.get("message") or "getToken 失败"))
-    return eval_sign_token(str(result.get("token") or ""))
+        print(f"ℹ️ getToken 业务失败 msg={clean_line(result.get('message') or result.get('msg') or '')[:80]}")
+        return ""
+    raw_js = str(result.get("token") or result.get("data") or "")
+    if isinstance(result.get("data"), dict):
+        raw_js = str(result["data"].get("token") or "")
+    return eval_sign_token(raw_js)
+
+
+def auth_related_error(msg: str) -> bool:
+    """仅企迈登录态问题才触发删缓存重登；签到 token/兑换/JS 失败不算。"""
+    if re.search(r"签到 token|getToken|活动会话|活动地址|JS|Node|pycryptodome", msg):
+        return False
+    return bool(re.search(r"登录失败|登录失效|token失效|qm-user-token|未登录|请先登录|HTTP 401", msg, re.I))
 
 
 def do_sign(session_cookie: str, sign_token: str, proxies=None) -> Tuple[bool, str, Optional[float]]:
@@ -696,10 +765,10 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
     except Exception as e:
         msg = clean_line(e)
         say(f"❌ {msg}")
-        # 原脚本有缓存：鉴权/登录类失败 → 删缓存 code 重登后重跑
-        if token and re.search(r"token|登录|失效|未登录|401", msg, re.I):
-            say("⚠️ token 失效，删除缓存 → code 重登 → 重跑")
-            extras.append("token失效 code重登")
+        # 仅企迈登录态问题才删缓存重登；getToken/签到 token 失败不重登
+        if token and auth_related_error(msg):
+            say("⚠️ 登录态失效，删除缓存 → code 重登 → 重跑")
+            extras.append("登录态失效 code重登")
             try:
                 clear_cached_token(openid)
                 token, login_mode = login_with_cache(openid, proxies)
