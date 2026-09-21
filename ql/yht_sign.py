@@ -554,36 +554,89 @@ def _node_path() -> Optional[str]:
     return None
 
 
+def _decode_js_escapes(s: str) -> str:
+    """还原 \\uXXXX / \\xXX，便于正则与 eval。"""
+    if not s:
+        return s
+
+    def _u(m: re.Match) -> str:
+        try:
+            return chr(int(m.group(1), 16))
+        except Exception:
+            return m.group(0)
+
+    out = re.sub(r"\\u([0-9a-fA-F]{4})", _u, s)
+    out = re.sub(r"\\x([0-9a-fA-F]{2})", _u, out)
+    return out
+
+
 def eval_sign_token(raw_js: str) -> str:
-    """执行混淆 JS 取 window['3fd0cbet']；失败则正则兜底。"""
+    """执行混淆 JS 取签到 token；失败则解码后正则兜底。"""
     if not raw_js:
         print("ℹ️ getToken 返回空 token 字段")
         return ""
     print(f"ℹ️ getToken JS len={len(raw_js)} 前80={clean_line(raw_js[:80])}")
-    keys = re.findall(r"window\[['\"]([^'\"]+)['\"]\]", raw_js)
-    if keys:
-        print(f"ℹ️ JS 内 window 键名（去重前）={unique_sample(keys)}")
-    fixed = re.sub(r"\b0([0-7]+)\b", r"0o\1", raw_js)
+    decoded = _decode_js_escapes(raw_js)
+    if decoded != raw_js:
+        print(f"ℹ️ 已解码 unicode 转义 len={len(decoded)}")
+    keys_raw = re.findall(r"window\[['\"]([^'\"]+)['\"]\]", decoded)
+    if keys_raw:
+        print(f"ℹ️ 解码后 window 键名={unique_sample(keys_raw)}")
+    if "3fd0cbet" in decoded:
+        print("ℹ️ 解码文本中包含 3fd0cbet 字样")
+
+    fixed = re.sub(r"\b0([0-7]+)\b", r"0o\1", decoded)
     node = _node_path()
     print(f"ℹ️ Node 运行时: {node or '未找到'}")
     if node:
         try:
-            # 用临时文件避免超长参数/转义问题
+            import json as _json
             import tempfile
             from pathlib import Path
 
+            runner = (
+                "var window = global.window = {};\n"
+                "var __err = '';\n"
+                f"var __code = {_json.dumps(fixed)};\n"
+                "try { eval(__code); } catch (e) { __err = String(e && e.message || e); }\n"
+                "var keys = [];\n"
+                "try { keys = Object.keys(window); } catch (e) {}\n"
+                "var found = '';\n"
+                f"var want = {_json.dumps(ACTIVITY_KEY)};\n"
+                "if (window[want] !== undefined && window[want] !== null && String(window[want]) !== 'undefined' && String(window[want]) !== '') {\n"
+                "  found = String(window[want]);\n"
+                "} else {\n"
+                "  for (var i = 0; i < keys.length; i++) {\n"
+                "    var k = keys[i];\n"
+                "    var v = window[k];\n"
+                "    if (v === undefined || v === null) continue;\n"
+                "    var vs = String(v);\n"
+                "    if (!vs || vs === 'undefined' || vs === '[object Object]') continue;\n"
+                "    if (k.indexOf('3fd0') >= 0 || k === want) { found = vs; break; }\n"
+                "  }\n"
+                "  if (!found && keys.length === 1) { found = String(window[keys[0]] || ''); }\n"
+                "}\n"
+                "process.stdout.write(JSON.stringify({keys: keys.slice(0, 30), found: found, err: __err}));\n"
+            )
             with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as tf:
-                tf.write("var window={};\n")
-                tf.write(fixed)
-                tf.write(f"\nprocess.stdout.write(String(window[{json.dumps(ACTIVITY_KEY)}]||''));\n")
+                tf.write(runner)
                 tmp = tf.name
             try:
-                r = subprocess.run([node, tmp], capture_output=True, timeout=20, text=True)
-                val = (r.stdout or "").strip()
-                err = clean_line((r.stderr or "")[:120])
-                print(f"ℹ️ Node stdout len={len(val)} stderr={err or '无'}")
-                if val and val != "undefined":
-                    return val
+                r = subprocess.run([node, tmp], capture_output=True, timeout=25, text=True)
+                out = (r.stdout or "").strip()
+                err = clean_line((r.stderr or "")[:160])
+                print(f"ℹ️ Node stdout={out[:240] or '空'} stderr={err or '无'}")
+                if out:
+                    try:
+                        info = json.loads(out)
+                        found = str(info.get("found") or "")
+                        if found:
+                            print(f"ℹ️ Node 解析成功 found_len={len(found)}")
+                            return found
+                        print(f"ℹ️ Node keys={info.get('keys')} err={info.get('err')}")
+                    except Exception:
+                        if out and out != "undefined":
+                            return out
             finally:
                 try:
                     Path(tmp).unlink(missing_ok=True)
@@ -591,23 +644,24 @@ def eval_sign_token(raw_js: str) -> str:
                     pass
         except Exception as e:
             print(f"ℹ️ Node 执行异常: {clean_line(e)[:80]}")
-    else:
-        print("ℹ️ 无 Node，跳过 eval，改用正则")
 
-    for key in (ACTIVITY_KEY,):
-        m = re.search(rf"window\[['\"]{re.escape(key)}['\"]\]\s*=\s*['\"]([^'\"]+)['\"]", raw_js)
-        if m:
-            print(f"ℹ️ 正则命中键 {key}")
-            return m.group(1)
-    # eval 包装：window["x"]="v" 可能在字符串里
-    m3 = re.search(rf"['\"]{re.escape(ACTIVITY_KEY)}['\"]\]\s*=\s*['\"]([^'\"]+)['\"]", raw_js)
-    if m3:
-        print(f"ℹ️ 正则命中（宽松）{ACTIVITY_KEY}")
-        return m3.group(1)
-    m2 = re.findall(r"window\[['\"]([0-9a-zA-Z_]{4,20})['\"]\]\s*=\s*['\"]([^'\"]{4,})['\"]", raw_js)
+    for src, tag in ((decoded, "decoded"), (raw_js, "raw")):
+        for pat in (
+            rf"window\[['\"]{re.escape(ACTIVITY_KEY)}['\"]\]\s*=\s*['\"]([^'\"]+)['\"]",
+            rf"['\"]{re.escape(ACTIVITY_KEY)}['\"]\]\s*=\s*['\"]([^'\"]+)['\"]",
+        ):
+            m = re.search(pat, src)
+            if m:
+                print(f"ℹ️ 正则命中（{tag}）")
+                return m.group(1)
+    m2 = re.findall(r"window\[['\"]([0-9a-zA-Z_]{4,20})['\"]\]\s*=\s*['\"]([^'\"]{4,})['\"]", decoded)
     if m2:
-        print(f"ℹ️ 正则候选项 window 键={ [k for k,_ in m2[:5]] }，取首个")
+        print(f"ℹ️ 正则候选项={ [k for k, _ in m2[:5]] }，取首个")
         return m2[0][1]
+    # 从 unicode 解码后再找 fromCharCode 结果附近的赋值
+    m3 = re.findall(r"window\[['\"]([^'\"]{4,24})['\"]\]\s*=\s*([A-Za-z_$][\w$]*)\s*[;,]", decoded)
+    if m3:
+        print(f"ℹ️ 发现 window 键赋给变量={m3[:4]}（需 eval 才能取值）")
     print("ℹ️ 未能从 getToken 响应解析出签到 token")
     return ""
 
