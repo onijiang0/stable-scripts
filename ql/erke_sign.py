@@ -16,14 +16,14 @@
 # hxek_scene     可选，默认 1001
 # ------------------------------------------
 # 契约（appid wxa1f1fa3785a47c7d，host hope.demogic.com/gic-wx-app）：
-# （自反编译主包；GIC 会员体系，密钥 damogic8888）
+# （自反编译主包；GIC 会员体系，密钥走 ERKE_SECRET）
 #
 # 响应：业务接口带 code/errcode，0000/1001/0 视为成功
 # 登录参数  POST smallcat /wx/code  json:{openid, appid} -> data.code (= jcode)
 # 业务登录  POST /on_login.json  form: jcode & openid & scene + 空会员字段 + sign
 #           -> response.memberInfo / enterpriseInfo
 #           含 memberId / enterpriseId / unionid / openid / wxOpenid / cliqueId
-# 签名      md5("timestamp={ts}transId={appid+ts}secret=damogic8888" \
+# 签名      md5("timestamp={ts}transId={appid+ts}secret={ERKE_SECRET}" \
 #               "random={r}memberId={memberId}")
 # 业务头    sign=<enterpriseId>  channelEntrance=wx_app
 # 签到      POST /sign/member_sign.json  json: source=wxapp & 会员字段 & sign
@@ -58,7 +58,7 @@ log = logging.getLogger("ErkeSM")
 
 APPID_DEFAULT = "wxa1f1fa3785a47c7d"
 BASE_URL = "https://hope.demogic.com/gic-wx-app"
-SECRET = "damogic8888"
+SECRET = os.getenv("ERKE_SECRET", "").strip()  # 勿写进仓库
 GIC_VERSION = "3.9.93"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -86,6 +86,8 @@ def build_sign(member_id: str, appid: str, timestamp: Optional[str] = None) -> D
     ts = timestamp or fmt_time(gmt8_now())
     rand = random.randint(0, 9_999_999)
     trans_id = appid + ts
+    if not SECRET:
+        raise RuntimeError("缺少 ERKE_SECRET")
     raw = f"timestamp={ts}transId={trans_id}secret={SECRET}random={rand}memberId={member_id}"
     return {
         "sign": md5(raw),
