@@ -45,8 +45,8 @@
 # 1. 原脚本有 token 缓存：失效必须删缓存再 code 登录后重跑；勿只重试不删缓存
 # 2. 登录接口为明文 JSON；业务 POST 需 AES-GCM（pycryptodome）
 # 3. getToken 需 Node 执行混淆 JS；无 Node 时用正则兜底 window['3fd0cbet']
-# 4. 键名 3fd0cbet 源自实测，若服务端更换需按抓包更新，勿凭空猜
-# 5. 签到 Cookie 不完整/JS 执行失败时明确失败，不伪造已签到
+# 4. **getToken 空/签到失败常见根因是小程序未授权手机号**，日志须写明，勿只报 JS 解析失败
+# 5. 签到 Cookie 不完整时明确失败，不伪造已签到
 # 6. 日志不打印完整 token/cookie；openid 脱敏
 # ------------------------------------------
 # */
@@ -105,6 +105,7 @@ STORE_ID = "203009"
 QMAI_BASE = "https://webapi.qmai.cn/web"
 QMAI_LOGIN = f"{QMAI_BASE}/account-center/oauth/mini-app-login"
 QMAI_REDIRECT = f"{QMAI_BASE}/catering/crm/member/redirect"
+QMAI_PROFILE = f"{QMAI_BASE}/account-center/crm/query-person-info"
 
 ACTIVITY_PAGE_URL = "https://86019.activity-12.m.duiba.com.cn/chw/visual-editor/skins?id=203576"
 ACTIVITY_TOKEN_URL = "https://86019-activity.dexfu.cn/chw/ctoken/getToken"
@@ -502,6 +503,33 @@ def fetch_activity_cookie(proxies=None) -> str:
     return ""
 
 
+def query_member_profile(token: str, proxies=None) -> Dict[str, Any]:
+    """企迈会员资料（POST+appid，AES-GCM）。用于判断是否已授权手机号。"""
+    try:
+        data = qmai_post(QMAI_PROFILE, {"appid": APPID}, token=token, proxies=proxies)
+    except Exception as e:
+        return {"ok": False, "mobile": "", "msg": clean_line(e)}
+    if not isinstance(data, dict):
+        return {"ok": False, "mobile": "", "msg": "资料响应异常"}
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    mobile = ""
+    for src in (inner, data):
+        if not isinstance(src, dict):
+            continue
+        for k in ("mobilePhone", "mobile", "phone", "phoneNumber"):
+            if src.get(k):
+                mobile = str(src.get(k))
+                break
+        if mobile:
+            break
+    ok = bool(data.get("status") is True or data.get("code") in (0, "0"))
+    return {"ok": ok, "mobile": mobile, "msg": clean_line(data.get("message") or "")}
+
+
+def phone_unauthorized_status() -> str:
+    return "小程序未授权手机号 ❌（请打开益禾堂小程序完成手机号授权/绑卡后再跑）"
+
+
 def get_redirect_url(token: str, proxies=None) -> str:
     data = qmai_post(QMAI_REDIRECT, {"redirectUrl": ACTIVITY_PAGE_URL}, token=token, proxies=proxies)
     if data.get("status") is not True or not data.get("data"):
@@ -718,8 +746,8 @@ def get_sign_token(session_cookie: str, proxies=None) -> str:
 
 
 def auth_related_error(msg: str) -> bool:
-    """仅企迈登录态问题才触发删缓存重登；签到 token/兑换/JS 失败不算。"""
-    if re.search(r"签到 token|getToken|活动会话|活动地址|JS|Node|pycryptodome", msg):
+    """仅企迈登录态问题才触发删缓存重登；授权手机号/签到 token/JS 失败不算。"""
+    if re.search(r"签到 token|getToken|活动会话|活动地址|JS|Node|pycryptodome|未授权手机号", msg):
         return False
     return bool(re.search(r"登录失败|登录失效|token失效|qm-user-token|未登录|请先登录|HTTP 401", msg, re.I))
 
@@ -778,6 +806,19 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
 
     def _biz(token: str) -> Dict[str, Any]:
         say("📋 业务流程")
+        # 先查会员资料：无手机号 → 小程序未授权，不误报 JS/token 问题
+        prof = query_member_profile(token, proxies)
+        mobile = prof.get("mobile") or ""
+        acc["phone"] = mobile
+        extras.append(f"手机 {mask_phone(mobile) if mobile else '未授权'}")
+        if not mobile:
+            say("❌ 小程序未授权手机号（会员资料无 mobile）")
+            extras.append("小程序未授权手机号")
+            acc["status"] = phone_unauthorized_status()
+            acc["error"] = "小程序未授权手机号"
+            acc["success"] = False
+            return acc
+
         activity_url = get_redirect_url(token, proxies)
         say(f"ℹ️ 活动地址已获取（len={len(activity_url)}）")
         time.sleep(random.uniform(0.8, 1.6))
@@ -788,7 +829,10 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
         time.sleep(random.uniform(0.8, 1.6))
         key = get_sign_token(cookie, proxies)
         if not key:
-            raise RuntimeError("签到 token 解析失败（getToken/JS）")
+            # 有手机仍拿不到签到 token 时，优先提示未授权/未开通会员活动，而非 JS 细节
+            say("❌ 未取到签到 token（常见原因：小程序未授权手机号/未开通会员活动，而非仅 JS 解析）")
+            extras.append("未取到签到token")
+            raise RuntimeError(phone_unauthorized_status())
         say("✅ 签到 token 已获取")
         time.sleep(random.uniform(0.8, 1.6))
         ok, status, gain = do_sign(cookie, key, proxies)
@@ -798,6 +842,9 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
         acc["success"] = ok
         if not ok:
             acc["error"] = status
+            if re.search(r"未授权|未绑定|手机号|未登录", status):
+                acc["status"] = phone_unauthorized_status()
+                extras.append("业务返回未授权手机号")
         return acc
 
     def _fail(msg: str, status: str) -> Dict[str, Any]:
