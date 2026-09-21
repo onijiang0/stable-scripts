@@ -18,7 +18,7 @@ function setupEnv() {
   g.performance = { now: () => Date.now() };
 }
 
-const SECRET = (process.env.YZF_SECRET || process.env.YZF_MGS_SECRET || process.env.yzf_secret || "").trim();
+const SECRET = (process.env.YZF_SECRET || process.env.YZF_MGS_SECRET || "63cb711f852f6ab6f1ecc9ade8f518c7").trim();
 const APPID = "FC1902C211615";
 const PUB = `-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoEcz1UBgi0DQgAEhYXsxs453JtwhnUbksd1oNu0ujvM

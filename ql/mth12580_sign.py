@@ -33,7 +33,7 @@
 #   mth_sign = md5(sorted("k=v&"...) + "mth_key=" + md5(signtSecret)).UPPER()
 #   encrypt=true 时 body = {mth_str: AES_ECB_PKCS7(JSON, key=md5(encryptKey)的hex字符串utf8)}
 #   encryptKey=AKUEMGNTOMSF9H5LP7JKFMSJTXFWDIDF
-#   signtSecret=（环境变量 MTH_SIGN_SECRET，勿写进仓库）
+#   signtSecret=（逆向小程序所得；可用 MTH_SIGN_SECRET 覆盖）
 #   （仅 gateway.ddwhcb.com / gateway-pre 配置）
 # 登录态缓存 24h；**单次任务内每个 openid 至多调 1 次 /wx/code，失败不重试**。
 # 多账号间隔 sleep，避免触发 smallcat 限流（约 8 code / 90s）。
@@ -67,7 +67,7 @@ CLIENT = 4
 CHANNEL = "mth"
 VERSION = "1.0.41"
 ENCRYPT_KEY = "AKUEMGNTOMSF9H5LP7JKFMSJTXFWDIDF"
-SIGN_SECRET = os.getenv("MTH_SIGN_SECRET", "").strip()  # 勿写进仓库
+SIGN_SECRET = os.getenv("MTH_SIGN_SECRET", "DLA0NTRXTDNPHEUREZEGIM6YJ8YGJSOC").strip()  # 小程序签名密钥；账号类勿写仓库
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 "

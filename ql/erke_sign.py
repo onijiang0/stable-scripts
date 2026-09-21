@@ -16,7 +16,7 @@
 # hxek_scene     可选，默认 1001
 # ------------------------------------------
 # 契约（appid wxa1f1fa3785a47c7d，host hope.demogic.com/gic-wx-app）：
-# （自反编译主包；GIC 会员体系，密钥走 ERKE_SECRET）
+# （自反编译主包；GIC 会员体系；签名密钥可用 ERKE_SECRET 覆盖）
 #
 # 响应：业务接口带 code/errcode，0000/1001/0 视为成功
 # 登录参数  POST smallcat /wx/code  json:{openid, appid} -> data.code (= jcode)
@@ -58,7 +58,7 @@ log = logging.getLogger("ErkeSM")
 
 APPID_DEFAULT = "wxa1f1fa3785a47c7d"
 BASE_URL = "https://hope.demogic.com/gic-wx-app"
-SECRET = os.getenv("ERKE_SECRET", "").strip()  # 勿写进仓库
+SECRET = os.getenv("ERKE_SECRET", "damogic8888").strip()  # 小程序签名密钥；账号类勿写仓库
 GIC_VERSION = "3.9.93"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
