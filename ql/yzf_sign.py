@@ -254,31 +254,55 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
         print(f"ℹ️ {line[:120]}")
         extras.append(line[:80])
 
+    sign_body = data.get("signIn")
     sign_rs = str(data.get("signInRs") or "")
+    task_info = data.get("tasks") if isinstance(data.get("tasks"), dict) else {}
+    browsed = task_info.get("browsed") or []
+    awarded = task_info.get("awarded") or []
+    if browsed:
+        extras.append(f"浏览任务上报{len(browsed)}个")
+    if awarded:
+        extras.append(f"任务领奖尝试{len(awarded)}个")
+
+    sign_ok = sign_rs.startswith("1000") or any("签到接口: 成功" in x for x in body_lines)
     if data.get("sessionExpired") or sign_rs.startswith("2000"):
         acc["status"] = "session 过期 ❌"
         acc["error"] = "result-status=2000 登录超时，更新 YZF_SESSION 后重试"
         print("⚠️ result-status=2000：sessionKey 过期，请刷新环境变量 YZF_SESSION")
         return acc
 
-    sign_body = data.get("signIn")
-    if sign_rs.startswith("1000") or (isinstance(sign_body, dict) and sign_body):
-        acc["success"] = True
-        acc["status"] = "签到完成 ✅"
-        reward = "-"
-        if isinstance(sign_body, dict):
-            for k in ("integral", "points", "score", "amount", "redbagAmount"):
-                if sign_body.get(k) not in (None, "", 0, "0"):
-                    reward = f"{k}+{sign_body.get(k)}"
-                    break
-            msg = sign_body.get("msg") or sign_body.get("memo") or ""
-            if msg and reward == "-":
-                reward = str(msg)[:30]
+    if sign_ok or browsed or awarded:
+        acc["success"] = bool(sign_ok) or any(
+            str(x.get("rs") or "").startswith("1000") for x in list(browsed) + list(awarded)
+        )
+        parts = []
+        if sign_ok:
+            parts.append("签到完成 ✅")
+            reward = "-"
+            if isinstance(sign_body, dict):
+                for k in ("integral", "points", "score", "amount", "redbagAmount"):
+                    if sign_body.get(k) not in (None, "", 0, "0"):
+                        reward = f"{k}+{sign_body.get(k)}"
+                        break
+                msg = sign_body.get("msg") or sign_body.get("memo") or ""
+                if msg and reward == "-":
+                    reward = str(msg)[:30]
+            acc["reward"] = reward
+        if browsed:
+            parts.append(f"浏览任务{len(browsed)}个")
+        if awarded:
+            parts.append(f"领奖尝试{len(awarded)}个")
+        if not acc["success"]:
+            acc["status"] = "任务已执行但未确认成功 ⚠️"
+            acc["error"] = "请看日志中的 rs="
+        else:
+            acc["status"] = " / ".join(parts)
         bag = data.get("redbag") if isinstance(data.get("redbag"), dict) else {}
         if bag.get("receivedRedbags") is not None:
             extras.append(f"红包已领{bag.get('receivedRedbags')}/{bag.get('redbagTotal')}")
-        acc["reward"] = reward
-        print(f"✅ 签到完成 {reward}")
+        if acc.get("success") and acc.get("reward") in ("-", "", None) and browsed:
+            acc["reward"] = "任务已执行"
+        print(f"{'✅' if acc['success'] else '⚠️'} {acc['status']} {acc.get('reward')}")
         return acc
 
     if res.get("ok"):
@@ -303,7 +327,7 @@ def main() -> int:
     print(
         f"==============================\n"
         f"🛒 任务名称：{APP_NAME}签到专区\n"
-        f"📌 登录 authTokenLogin / 签到 SignInService.signIn\n"
+        f"📌 签到 signIn + 浏览任务 sendTaskMessAge/receiveTaskAward\n"
         f"------------------------------"
     )
     accounts: List[Dict[str, Any]] = []

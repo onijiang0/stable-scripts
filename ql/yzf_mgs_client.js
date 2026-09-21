@@ -45,6 +45,13 @@ const OPS = {
   queryUserInfo: "com.bestpay.mbp.customer.facade.UserInfoFacade.queryUserInfo",
   getIpRid: "com.bestpay.bestpaymall.bffmallcli.api.mlogin.service.MloginService.getIpRidAndIpTidByPhone",
   newQueryTheMonthTaskList: "com.bestpay.marketingadapter.api.y2024.mission.MissionService.newQueryTheMonthTaskList",
+  queryTheMonthTaskList: "com.bestpay.marketingadapter.api.y2024.mission.MissionOutputService.queryTheMonthTaskList",
+  queryTaskInfo: "com.bestpay.marketingadapter.api.y2024.mission.MissionOutputService.queryTaskInfo",
+  queryCumulativeTaskList: "com.bestpay.marketingadapter.api.y2024.mission.MissionOutputService.queryCumulativeTaskList",
+  // 抓包：浏览/行为完成上报（无独立 completeTask）
+  sendTaskMessAge: "com.bestpay.marketingadapter.api.y2022.mission.service.MissionTaskService.sendTaskMessAge",
+  receiveTaskAward: "com.bestpay.marketingadapter.api.y2024.mission.MissionTaskService.receiveTaskAward",
+  receiveCumulativeTaskAward: "com.bestpay.marketingadapter.api.y2024.mission.MissionTaskService.receiveCumulativeTaskAward",
 };
 
 // 抓包回填的平台常量（非账号）
@@ -283,6 +290,142 @@ function unwrap(body) {
   return body.data !== undefined ? body.data : body;
 }
 
+function pickTaskList(u) {
+  if (!u) return [];
+  const bags = [
+    u.taskList,
+    u.list,
+    u.monthTaskList,
+    u.tasks,
+    u.taskDTOList,
+    u.rows,
+    u.records,
+    u.cumulativeTaskList,
+  ];
+  for (const b of bags) {
+    if (Array.isArray(b) && b.length) return b;
+  }
+  if (Array.isArray(u)) return u;
+  for (const k of Object.keys(u)) {
+    const v = u[k];
+    if (Array.isArray(v) && v.length && v[0] && typeof v[0] === "object" && (v[0].taskId || v[0].taskType || v[0].taskName)) {
+      return v;
+    }
+    if (v && typeof v === "object" && Array.isArray(v.taskList)) return v.taskList;
+  }
+  return [];
+}
+
+function taskLabel(t) {
+  return String(t.taskName || t.name || t.title || t.taskDesc || t.taskType || t.taskId || "");
+}
+
+function isBrowseLike(t) {
+  const s = (taskLabel(t) + " " + (t.taskType || "") + " " + (t.bizType || "")).toLowerCase();
+  return /浏览|逛|看看|访问|browse|visit|look|video|视频|页面|会场/.test(s);
+}
+
+function isTaskPending(t) {
+  const st = String(t.taskStatus ?? t.status ?? t.state ?? t.finishFlag ?? "").toLowerCase();
+  if (["", "0", "1", "todo", "pending", "unfinished", "doing", "in_progress", "未完成", "进行中"].includes(st)) return true;
+  if (["2", "3", "done", "finish", "finished", "completed", "complete", "received", "已领取", "已完成"].includes(st)) return false;
+  if (t.isFinish === true || t.finished === true || t.completed === true) return false;
+  if (t.isReceive === true || t.received === true || t.awardStatus === 2) return false;
+  return true;
+}
+
+async function runBrowseTasks(client, optsUser, actFromEnergy) {
+  const lines = [];
+  const data = { browsed: [], awarded: [], monthTasks: null };
+  const month = await client.call(OPS.newQueryTheMonthTaskList, {}, optsUser);
+  const mu = unwrap(month.body) || {};
+  data.monthTasks = mu;
+  data.monthRs = month.resultStatus;
+  lines.push("月任务列表 rs=" + month.resultStatus);
+
+  const prog = await client.call(OPS.queryTheMonthTaskList, {}, optsUser);
+  const pu = unwrap(prog.body) || {};
+  data.monthProgress = pu;
+  lines.push("月任务进度 rs=" + prog.resultStatus);
+
+  const tasks = pickTaskList(mu).length ? pickTaskList(mu) : pickTaskList(pu);
+  const activityId =
+    actFromEnergy ||
+    mu.activityId ||
+    mu.activityNo ||
+    pu.activityId ||
+    pu.activityNo ||
+    (tasks[0] && (tasks[0].activityId || tasks[0].activityNo)) ||
+    "";
+  data.taskActivityId = activityId;
+
+  const pendingBrowse = tasks.filter((t) => t && isTaskPending(t) && (isBrowseLike(t) || !t.taskType));
+  const target = pendingBrowse.slice(0, 5);
+  lines.push(
+    "任务: 共" + tasks.length + " 待浏览类" + pendingBrowse.length + " 本次尝试" + target.length
+  );
+
+  for (const t of target) {
+    const taskId = t.taskId || t.id || "";
+    const taskType = t.taskType || t.bizType || "";
+    const payload = {
+      activityId,
+      activityNo: activityId,
+      taskId,
+      taskType,
+      taskCode: t.taskCode || "",
+      finishFlag: 1,
+      finishFlagStr: "1",
+      msgType: t.msgType || taskType || "browse",
+      source: "applet",
+    };
+    const fin = await client.call(OPS.sendTaskMessAge, payload, optsUser);
+    const fu = unwrap(fin.body);
+    data.browsed.push({ taskId, taskType, label: taskLabel(t), rs: fin.resultStatus, body: fu });
+    lines.push(
+      "浏览上报 " +
+        (taskLabel(t).slice(0, 16) || taskId) +
+        " rs=" +
+        fin.resultStatus
+    );
+    const award = await client.call(
+      OPS.receiveTaskAward,
+      { activityId, activityNo: activityId, taskId, taskType, awardId: t.awardId || t.prizeId || "" },
+      optsUser
+    );
+    const aw = unwrap(award.body);
+    data.awarded.push({ taskId, rs: award.resultStatus, body: aw });
+    const awMsg = (aw && (aw.memo || aw.msg || aw.errorMsg)) || "";
+    lines.push("领奖 rs=" + award.resultStatus + (awMsg ? " " + String(awMsg).slice(0, 24) : ""));
+  }
+
+  const cum = await client.call(OPS.queryCumulativeTaskList, {}, optsUser);
+  const cu = unwrap(cum.body) || {};
+  data.cumulative = cu;
+  const cumTasks = pickTaskList(cu);
+  for (const t of cumTasks.slice(0, 3)) {
+    if (!isTaskPending(t)) continue;
+    const taskId = t.taskId || t.id || "";
+    const r = await client.call(
+      OPS.receiveCumulativeTaskAward,
+      {
+        activityId: activityId || t.activityId || "",
+        taskId,
+        taskType: t.taskType || "",
+        awardId: t.awardId || "",
+      },
+      optsUser
+    );
+    data.awarded.push({ taskId, rs: r.resultStatus, cumulative: true });
+    lines.push("累计任务领奖 " + (taskLabel(t).slice(0, 12) || taskId) + " rs=" + r.resultStatus);
+  }
+
+  const again = await client.call(OPS.queryTheMonthTaskList, {}, optsUser);
+  data.monthProgressAfter = unwrap(again.body);
+  lines.push("任务复核 rs=" + again.resultStatus);
+  return { lines, data };
+}
+
 async function dailyCheck({ sessionKey, productNo, ipTId, ipRId, sdkPath, doLoginFirst }) {
   const client = createClient({
     sessionKey,
@@ -344,7 +487,8 @@ async function dailyCheck({ sessionKey, productNo, ipTId, ipRId, sdkPath, doLogi
   data.signInRs = sign.resultStatus;
   const signMemo =
     (data.signIn && (data.signIn.memo || data.signIn.msg || data.signIn.errorMsg)) || "";
-  if (String(sign.resultStatus || "").startsWith("1000")) {
+  const signOk = String(sign.resultStatus || "").startsWith("1000");
+  if (signOk) {
     lines.push("签到接口: 成功" + (signMemo ? " " + String(signMemo).slice(0, 40) : ""));
   } else {
     lines.push("签到接口: rs=" + sign.resultStatus + (signMemo ? " " + signMemo.slice(0, 40) : ""));
@@ -369,6 +513,16 @@ async function dailyCheck({ sessionKey, productNo, ipTId, ipRId, sdkPath, doLogi
   data.greenEnergy = geoU;
   const actScore = geoU.integralActivityNo || geoU.marketActivityNo || "";
   lines.push("能量/活动号: " + (actScore || "-"));
+
+  // 抓包：浏览任务 = sendTaskMessAge 上报 + receiveTaskAward 领奖
+  try {
+    const taskRes = await runBrowseTasks(client, optsUser, actScore || "");
+    lines.push(...taskRes.lines);
+    data.tasks = taskRes.data;
+  } catch (e) {
+    lines.push("浏览任务异常: " + (e && e.message ? e.message : e));
+  }
+
   if (productNo && actScore) {
     const score = await client.call(
       OPS.queryMarketScore,
@@ -382,7 +536,8 @@ async function dailyCheck({ sessionKey, productNo, ipTId, ipRId, sdkPath, doLogi
   const ship = await client.call(OPS.queryBestpayUserShip, {}, optsUser);
   data.vip = unwrap(ship.body);
   lines.push("会员 rs=" + ship.resultStatus);
-  data.ok = String(sw.resultStatus || "").startsWith("1000") || String(sign.resultStatus || "").startsWith("1000");
+  data.ok = signOk;
+  data.signInConfirmed = signOk;
   return { lines, data, ok: data.ok };
 }
 
@@ -431,33 +586,7 @@ async function tryLogin(client, mat) {
     eventOverride: loginEventCtx(),
   };
 
-  // 抓包 2026-09-21：真实登录入口是 LoginFacade.authTokenLogin（body 加密，无 appletAuthorizeLogin）
-  const authVariants = [
-    baseData({
-      code,
-      wxCode: code,
-      loginCode: code,
-      phoneCode,
-      encryptedData: mat.encryptedData || "",
-      iv: mat.iv || "",
-      productNo: mobile,
-      appId,
-      sourceAppId: appId,
-      openId: mat.openid || "",
-      authorizeId: mat.openid || "",
-      targetAppType: "117",
-      appType: 117,
-      partnerToken: code || phoneCode,
-      loginToken: code || phoneCode,
-      authSource: "appletAuthorize",
-      authorizeSource: "appletAuthorize",
-      businessChannel: "appletAuthorize",
-      channel: "appletAuthorize",
-      arNo: "8901011101110001",
-      pdPath: "appletAuthorize",
-      pdCd: "01110110",
-    }),
-  ];
+  // 抓包：真实入口 authTokenLogin。业务失败后不再盲试 applet（会刷屏且字段仍缺）
   for (let i = 0; i < authVariants.length; i++) {
     try {
       const r = await client.call(LOGIN_OPS.authTokenLogin, authVariants[i], loginOpts);
@@ -477,12 +606,16 @@ async function tryLogin(client, mat) {
           raw: body,
         };
       }
+      if (String(memo).includes("登录失败") || String(memo).includes("重新登录")) {
+        console.log("LOGIN authTokenLogin 业务失败，跳过 applet 盲试");
+        break;
+      }
     } catch (e) {
       console.log("LOGIN authTokenLogin err", i, e.message);
     }
   }
 
-  // 1) authorizeCodeAuth — 历史探测可返回 openId/unionId（不一定给 sessionKey）
+  // authorizeCodeAuth 仅一次：历史上可拿 openId，通常无 sessionKey
   const authCode = await client.call(
     LOGIN_OPS.authorizeCodeAuth,
     baseData({
