@@ -47,6 +47,7 @@
 | `cmcc_sign.py` | 中国移动 10086 · 小程序 SSO 全链路 | `cmcc` | `30 14 * * *` |
 | `xxy_sign.py` | 芯享会（心相印）· code 登录 + 每日签到 | `xxy` | `35 14 * * *` |
 | `xboxjlb_sign.py` | Xbox 俱乐部 · 有赞小程序签到 | `xboxjlb` | `40 14 * * *` |
+| `naixue_sign.py` | 奈雪的茶 · 会员每日签到（奈雪币 / 成长值） | `naixue` | `48 14 * * *` |
 | `yzf_sign.py` | 翼支付（电信 bestpay）· 签到专区 | `yzf` | `22 15 * * *` |
 | `qch_sign.py` | 七彩虹商城 · 每日签到 / 积分 | `qch` | `36 15 * * *` |
 | `hsay_sign.py` | 沪上阿姨 · 企迈 code 登录 + 签到 / 积分 | `hsay` | `41 15 * * *` |
