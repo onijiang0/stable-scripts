@@ -462,6 +462,8 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
         if not wid:
             say("⚠️ 登录未返回 wid，业务请求可能失败")
         name, mobile = query_user(token, wid)
+        if not (name or "").strip() or (name or "").strip() in {"ㅤ", "-", "未知用户"}:
+            name = f"账号{index}"
         acc["account"] = name or acc["account"]
         acc["phone"] = mobile
         extras.append(f"用户 {name} {mask_phone(mobile) if mobile else '-'}")
@@ -506,9 +508,21 @@ def main() -> int:
         print(f"{mark} {a.get('account')} | {a.get('status')} | {a.get('reward')}")
     print(f"------------------------------\n📊 成功 {ok_n}/{len(accounts)} | 耗时 {cost}s\n==============================")
     try:
-        notify_and_format(f"{APP_NAME}签到", accounts, cost_s=cost)
+        notify_and_format(
+            f"{APP_NAME}签到",
+            accounts,
+            title=f"{APP_NAME}签到 {ok_n}/{len(accounts)}",
+            start_ts=started,
+        )
     except Exception:
-        print("🔔 推送结果：跳过")
+        print(
+            format_report(
+                f"{APP_NAME}签到",
+                accounts,
+                push_result="推送模块异常",
+                cost_s=time.time() - started,
+            )
+        )
     return 0 if ok_n else 2
 
 
