@@ -14,7 +14,7 @@
 # 依赖变量：
 # wx_server_url      必填，取码服务地址（使用者自备，勿写进仓库）
 # wx_auth            必填，取码服务鉴权
-# HSAY_BRAND_ID      选填，企迈 brandId；登录报「品牌Id为空」时必填
+# HSAY_BRAND_ID      选填，覆盖企迈 brandId（默认已写脚本，反编译 storeId）
 # HSAY_ACTIVITY_ID   选填，签到活动 id（平台侧可能按月变更）
 # QL_NOTIFY          选填，0 关闭推送
 # ------------------------------------------
@@ -22,12 +22,13 @@
 # 1. 多账号；缺变量明确报错；单号失败不中断
 # 2. code 换 qm-user-token；本地缓存；失效删缓存后 code 重登并重跑
 # 3. 每日签到 + 积分查询；签到/积分结果写入统一简报
-# 4. send_notify 推送；脱敏日志；业务密钥写在脚本默认值
+# 4. send_notify 推送；脱敏日志；平台密钥/brandId 写在脚本默认值
 #
-# 契约（appid wxd92a2d29f8022f40，企迈 qmai）：
+# 契约（appid wxd92a2d29f8022f40，企迈 qmai，品牌「沪上阿姨点单」）：
 # code     POST {wx_server_url}/wx/code auth:{wx_auth} json:{openid,appid}
 # 登录     POST https://webapi.qmai.cn/web/account-center/oauth/mini-app-login
 #          AES-GCM body {code,eVersion:"1.0",brandId} -> token
+#          brandId 默认 201424（包内 storeId/brandId 同源）
 # 签到     POST /web/cmk-center/sign/takePartInSign
 #          AES-GCM body {activityId,appid}
 #          code=0 且 status=true 签到成功；code=400041 多为已签
@@ -37,11 +38,11 @@
 #          SDK 固定串写在脚本内（非账号密钥）
 #
 # 踩坑：
-# 1. 原脚本有 token 缓存：失效必须删缓存再 code 重登后重跑
-# 2. 登录也是 AES-GCM，不是明文 JSON
-# 3. brandId 缺失可能报「品牌Id为空」，用 HSAY_BRAND_ID 补
-# 4. 活动 id 会变，可用 HSAY_ACTIVITY_ID 覆盖
-# 5. 签到成功/已签都要在日志写清；积分尽量给出数值
+# 1. 原脚本 brandId 默认为空，登录会报 10102「品牌Id为空」
+# 2. 平台 ID（brandId/storeId/activityId）应从原脚本或反编译回填进默认值
+# 3. 原脚本有 token 缓存：失效必须删缓存再 code 重登后重跑
+# 4. 登录也是 AES-GCM，不是明文 JSON
+# 5. 活动 id 会变，可用 HSAY_ACTIVITY_ID 覆盖
 # ------------------------------------------
 # */
 
@@ -93,13 +94,12 @@ except ImportError:
 
 APP_NAME = "沪上阿姨"
 APPID = "wxd92a2d29f8022f40"
-# 平台业务参数（可写脚本；账号类只走环境变量）
+# 平台参数（非账号密钥，写进脚本默认值；原脚本 brandId 为空，反编译 storeId=brandId）
 KEY_RAW = "mN6KpXq8Sv2WxYz9LdFcRgHjMnBvCtDxZaS3QwE5rT0yU7I4O1A"
 KEY_VERSION = "1.0.0"
 META_HEADER = "QM-Encrypt-Meta"
-STORE_ID = ""
-
-BRAND_ID = os.getenv("HSAY_BRAND_ID", "").strip()
+STORE_ID = "201424"  # 包内 ext.storeId；与 brandId 同源
+BRAND_ID = os.getenv("HSAY_BRAND_ID", "201424").strip() or "201424"
 ACTIVITY_ID = os.getenv("HSAY_ACTIVITY_ID", "702822503017398273").strip() or "702822503017398273"
 BASE_URL = "https://webapi.qmai.cn"
 LOGIN_URL = f"{BASE_URL}/web/account-center/oauth/mini-app-login"
