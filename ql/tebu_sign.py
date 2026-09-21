@@ -344,15 +344,9 @@ def login_by_code(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
         f"msg={clean_line(data.get('msg') or data.get('message') or '')[:40] or ('ok' if token else '无')}"
     )
     if has_auth_url:
-        print("⚠️ 登录返回 authCenterUrl：需在小程序内完成授权/开卡后，业务接口才能调用")
+        print("⚠️ 登录返回 authCenterUrl：若业务仍 code=2025，请在小程序内完成授权/开卡")
     if not token:
         return None, {"message": clean_line(data.get("msg") or "登录响应未返回 mobileToken")}
-    # 包内：授权后会拉 getNascentId；纯 HTTP 先尝试一次
-    try:
-        nas = api_get("/mobile/customer/getNascentId", token, extract_shop_id(data))
-        print(f"ℹ️ getNascentId success={nas.get('success')} code={nas.get('code')} msg={err_msg(nas)[:40] or 'ok'}")
-    except Exception:
-        pass
     return token, data
 
 
@@ -420,6 +414,52 @@ def login_with_cache(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     """不缓存 token：每次 code 登录。"""
     token, raw = login_by_code(openid)
     return token, raw or {}
+
+
+def post_login_bootstrap(token: str, shop_id: str) -> str:
+    """
+    按包内流程：getShopCustomer / getExclusiveShop / checkAuth，解析可用 shopId。
+    返回推荐 shopId（仍失败则原样返回入参）。
+    """
+    sid = str(shop_id or SHOP_ID)
+    extras_try = []
+    # 1) checkAuth
+    r1 = api_get("/mobile/customer/checkAuth", token, sid)
+    print(f"ℹ️ checkAuth code={r1.get('code')} msg={err_msg(r1)[:40] or 'ok'}")
+    # 2) getShopCustomer（可能带/不带 shopId）
+    for label, s in (("with-shop", sid), ("no-shop", "")):
+        try:
+            r2 = api_get("/mobile/getShopCustomer", token, s)
+            msg = err_msg(r2)[:40] or "ok"
+            print(f"ℹ️ getShopCustomer[{label}] code={r2.get('code')} msg={msg}")
+            if is_ok(r2):
+                info = r2.get("result") or {}
+                newsid = str(
+                    (info.get("shopInfo") or {}).get("shopId")
+                    or info.get("shopId")
+                    or ""
+                )
+                if newsid:
+                    print(f"✅ getShopCustomer 返回 shopId={newsid}")
+                    sid = newsid
+                    break
+        except Exception as e:
+            print(f"ℹ️ getShopCustomer[{label}] 异常 {clean_line(e)[:40]}")
+    # 3) 专属门店
+    try:
+        r3 = api_post("/mobile/shop/getExclusiveShop", token, {})
+        msg = err_msg(r3)[:40] or "ok"
+        print(f"ℹ️ getExclusiveShop code={r3.get('code')} msg={msg}")
+        if is_ok(r3):
+            info = r3.get("result") or {}
+            newsid = str(info.get("shopId") or (info.get("shopInfo") or {}).get("shopId") or "")
+            if newsid:
+                print(f"✅ exclusiveShop shopId={newsid}")
+                sid = newsid
+    except Exception as e:
+        print(f"ℹ️ getExclusiveShop 异常 {clean_line(e)[:40]}")
+    extras_try.append(sid)
+    return sid
 
 
 def query_user(token: str, shop_id: str = "") -> Tuple[str, str]:
@@ -520,7 +560,8 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
 
     def _biz(token: str, raw: Dict[str, Any], mode: str) -> Dict[str, Any]:
         extras.append(mode)
-        shop_id = extract_shop_id(raw)
+        shop_id = extract_shop_id(raw) or SHOP_ID
+        shop_id = post_login_bootstrap(token, shop_id)
         extras.append(f"shopId {shop_id}")
         say(f"✅ 登录成功 token={mask_token(token)}")
         name, mobile = query_user(token, shop_id)
