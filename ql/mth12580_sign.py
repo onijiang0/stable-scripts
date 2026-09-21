@@ -396,7 +396,7 @@ def lottery_query(api: "DclApi") -> List[str]:
 
 
 def lottery_draw(api: "DclApi") -> List[str]:
-    """积分达标后只抽 1 次。"""
+    """积分达标后只抽 1 次；成功时必须打出奖品名。"""
     lines: List[str] = []
     try:
         res = api.call("luckDraw", {})
@@ -405,16 +405,43 @@ def lottery_draw(api: "DclApi") -> List[str]:
     code = res.get("code")
     msg = str(res.get("msg") or res.get("message") or "")
     data = res.get("data") if isinstance(res.get("data"), dict) else {}
-    prize = (
-        data.get("prizeName")
-        or data.get("prize_name")
-        or data.get("awardName")
-        or data.get("giftName")
-        or data.get("name")
-        or ""
-    )
+    # 奖品可能在 data 多层嵌套里
+    prize = ""
+    for k in (
+        "prizeName", "prize_name", "awardName", "giftName", "goodsName",
+        "couponName", "productName", "itemName", "rewardName", "name",
+        "prize", "gift", "award",
+    ):
+        v = _walk_find(data if data else res, (k,))
+        if isinstance(v, dict):
+            v = v.get("name") or v.get("prizeName") or v.get("title") or ""
+        if isinstance(v, (int, float)) and k in ("prize", "gift", "award"):
+            v = f"奖品ID:{int(v)}"
+        if isinstance(v, str) and v.strip() and v.strip() not in ("null", "none", "-"):
+            prize = v.strip()
+            break
+    if not prize:
+        # 列表型 data.list[0].xxx
+        for key in ("list", "prizeList", "awardList", "resultList", "records"):
+            arr = data.get(key) if isinstance(data, dict) else None
+            if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+                prize = str(
+                    arr[0].get("prizeName")
+                    or arr[0].get("name")
+                    or arr[0].get("giftName")
+                    or arr[0].get("awardName")
+                    or ""
+                ).strip()
+                if prize:
+                    break
     if code in (0, "0"):
-        lines.append(f"抽奖1次 成功 奖品={prize or data.get('prizeId') or '-'} {msg}".strip())
+        if prize:
+            lines.append(f"抽奖1次 成功 ✅ 奖品：{prize}" + (f" {msg}" if msg else ""))
+        else:
+            lines.append(
+                f"抽奖1次 成功 ✅ 奖品：接口未返回名称（data键={list(data.keys())[:8] if isinstance(data, dict) else type(data).__name__}）"
+                + (f" msg={msg[:40]}" if msg else "")
+            )
     else:
         low = msg.lower()
         if any(x in (msg + low) for x in ("已抽", "次数", "上限", "不足", "用完", "already", "limit")):
