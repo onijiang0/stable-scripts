@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# /*
-# ------------------------------------------
-# @Author: onijiang0
-# @Date: 2026.09.20
-# @Description: 推送与简报封装（库文件，供 ql/ 下签到脚本 import，非独立定时任务）
-# ------------------------------------------
-# 用法：from send_notify import notify_and_format
-#       notify_and_format(task, accounts, title=..., start_ts=...)
-#
-# 推送链路：优先执行 ../tools/sendNotify.js，失败回落 PushPlus HTTP。
-# 环境变量：PUSHPLUS_TOKEN / PUSH_PLUS_TOKEN / PUSHPLUS_KEY（任一）；
-#           PUSHPLUS_TOPIC 可选；QL_NOTIFY=0 关闭推送。
-#
-# 内置脱敏：mask_phone / mask_id；clean_line 丢弃原始 JSON 与超长串。
-# ------------------------------------------
-# */
 from __future__ import annotations
 
 import os
