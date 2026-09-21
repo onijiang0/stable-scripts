@@ -407,37 +407,19 @@ def read_cached_token(openid: str) -> Optional[str]:
 
 
 def write_cached_token(openid: str, token: str, raw_login: Dict[str, Any]) -> None:
-    expire = datetime.fromtimestamp(time.time() + 6000).isoformat()
-    cache = load_cache()
-    cache[cache_key(openid)] = {"token": token, "expireTime": expire, "updateTime": datetime.now().isoformat()}
-    save_cache(cache)
+    """按规范：不缓存 token。"""
+    return
 
 
 def clear_cached_token(openid: str) -> None:
-    cache = load_cache()
-    cache.pop(cache_key(openid), None)
-    save_cache(cache)
-    print("🗑️ 已删除本地 token 缓存")
+    """无有效缓存时不删除；规范要求不缓存。"""
+    return
 
 
 def login_with_cache(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
-    cached = read_cached_token(openid)
-    if cached:
-        if token_valid(cached, SHOP_ID):
-            print("ℹ️ token缓存登录")
-            return cached, {"shopId": SHOP_ID}
-        print("⚠️ 缓存 token 失效，删除后 code 重登")
-        clear_cached_token(openid)
-        token, raw = login_by_code(openid)
-        if token:
-            write_cached_token(openid, token, raw or {})
-            return token, raw or {}
-        return None, {}
+    """不缓存 token：每次 code 登录。"""
     token, raw = login_by_code(openid)
-    if token:
-        write_cached_token(openid, token, raw or {})
-        return token, raw or {}
-    return None, {}
+    return token, raw or {}
 
 
 def query_user(token: str, shop_id: str = "") -> Tuple[str, str]:
@@ -575,14 +557,13 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
         msg = clean_line(e)
         say(f"❌ {msg}")
         if re.search(r"token|登录|401|未登录|过期", msg, re.I):
-            say("⚠️ 登录态失效，删除缓存 → code 重登 → 重跑")
+            say("⚠️ 登录态失效，code 重登 → 重跑")
             extras.append("登录态失效 code重登")
             try:
-                clear_cached_token(openid)
                 token, raw = login_with_cache(openid)
                 if not token:
                     return _fail("重登失败", "重登失败 ❌")
-                return _biz(token, raw or {}, "缓存失效 code重登")
+                return _biz(token, raw or {}, "code重登")
             except Exception as e2:
                 msg2 = clean_line(e2)
                 return _fail(msg2, f"重登重跑失败 ❌ ({msg2[:40]})")
