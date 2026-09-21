@@ -7,7 +7,7 @@
 # ------------------------------------------
 # 变量名：xboxjlb
 # 变量值：wx_server 里的 openid，多账号用换行分隔
-# 示例：owNAX6hm...etI6o
+# 示例：openid，多账号换行或 &，可 #备注
 #
 # 依赖变量：
 # wx_server_url  必填，wx_server 地址（勿写进仓库）
