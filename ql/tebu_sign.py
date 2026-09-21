@@ -112,22 +112,18 @@ def _sha1_hex(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def compute_sign(payload: Dict[str, Any], ts: int, is_post: bool = True) -> str:
-    """vecrp：POST 用 body=json + secretKey + ts，键值串排序后拼接再 sha1。"""
-    import json as _json
+def compute_sign(payload: Dict[str, Any], ts: int, is_post: bool = True) -> Tuple[str, str]:
+    """返回 (sign, signed_body_str)。POST body 与签名所用字符串必须完全一致。"""
     if is_post:
-        bag = {
-            "body": _json.dumps(payload if payload is not None else {}, separators=(",", ":"), ensure_ascii=False),
-            "secretKey": SECRET_KEY,
-            "ts": ts,
-        }
-    else:
-        bag = dict(payload or {})
-        bag["secretKey"] = SECRET_KEY
-        bag["ts"] = ts
-    parts = [f"{k}{bag[k]}" for k in bag]
-    parts.sort()
-    return _sha1_hex("".join(parts))
+        body_str = json.dumps(payload if payload is not None else {}, separators=(",", ":"), ensure_ascii=False)
+        bag = {"body": body_str, "secretKey": SECRET_KEY, "ts": ts}
+        parts = sorted(f"{k}{bag[k]}" for k in bag)
+        return _sha1_hex("".join(parts)), body_str
+    bag = dict(payload or {})
+    bag["secretKey"] = SECRET_KEY
+    bag["ts"] = ts
+    parts = sorted(f"{k}{bag[k]}" for k in bag)
+    return _sha1_hex("".join(parts)), ""
 
 
 def say(msg: str) -> None:
@@ -308,7 +304,6 @@ def clear_cached_token(openid: str) -> None:
 
 def api_get(url: str, token: str) -> Dict[str, Any]:
     try:
-        # GET sign：params 并入 secretKey/ts（按包内逻辑，业务 GET 也可带 query）
         ts = int(time.time() * 1000)
         parsed = url.split("?", 1)
         query: Dict[str, Any] = {}
@@ -317,7 +312,7 @@ def api_get(url: str, token: str) -> Dict[str, Any]:
                 if "=" in pair:
                     k, v = pair.split("=", 1)
                     query[k] = v
-        sign = compute_sign(query, ts, is_post=False)
+        sign, _ = compute_sign(query, ts, is_post=False)
         r = http("GET", url, headers=common_headers(token, sign=sign, ts=str(ts)))
         data = r.json()
         return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
@@ -332,11 +327,16 @@ def api_get(url: str, token: str) -> Dict[str, Any]:
 
 
 def api_post(url: str, token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """POST：body 字节流必须与签名所用 JSON 字符串一致（禁止 requests json= 重序列化）。"""
     try:
         ts = int(time.time() * 1000)
-        sign = compute_sign(payload or {}, ts, is_post=True)
-        r = http("POST", url, headers=common_headers(token, sign=sign, ts=str(ts)), json=payload or {})
-        data = r.json()
+        sign, body_str = compute_sign(payload or {}, ts, is_post=True)
+        headers = common_headers(token, sign=sign, ts=str(ts))
+        r = http("POST", url, headers=headers, data=body_str.encode("utf-8"))
+        try:
+            data = r.json()
+        except Exception:
+            data = {"success": False, "msg": clean_line(r.text)[:80]}
         return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
     except Exception as e:
         msg = clean_line(e) or str(e)
@@ -368,10 +368,13 @@ def login_by_code(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     }
     data = api_post(LOGIN_URL, "", payload)
     token = extract_token(data)
-    msg = err_msg(data) if not token else "ok"
-    print(f"ℹ️ 登录响应 success={data.get('success')} msg={clean_line(msg)[:60]}")
+    code = data.get("code") if data.get("code") is not None else ""
+    print(
+        f"ℹ️ 登录响应 success={data.get('success')} code={code} "
+        f"msg={clean_line(data.get('msg') or data.get('message') or '')[:50] or ('ok' if token else '无')}"
+    )
     if not token:
-        return None, {"message": msg or "登录响应未返回 mobileToken"}
+        return None, {"message": err_msg(data) or "登录响应未返回 mobileToken"}
     return token, data
 
 
