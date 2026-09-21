@@ -371,13 +371,15 @@ def login_by_code(openid: str, proxies=None) -> Tuple[Optional[str], Dict[str, A
     except Exception as e:
         return None, {"message": clean_line(e)}
     code_s = str(data.get("code") if data.get("code") is not None else "")
-    if code_s not in ("0", "0.0"):
-        # 企迈登录有时用 code==0，兼容 status
-        if not (data.get("status") is True):
-            return None, {"message": clean_line(data.get("message") or f"登录失败 code={code_s}")}
+    biz_msg = clean_line(data.get("message") or data.get("msg") or "")
+    status_ok = data.get("status") is True
+    print(f"ℹ️ 登录响应 code={code_s or '无'} status={status_ok} msg={biz_msg[:80] or '无'}")
+    if code_s not in ("0", "0.0") and not status_ok:
+        return None, {"message": biz_msg or f"登录失败 code={code_s}"}
     token = extract_token(data)
     if not token:
-        return None, {"message": "登录响应未返回 token"}
+        say("ℹ️ 登录响应未识别 token 字段")
+        return None, {"message": biz_msg or "登录响应未返回 token"}
     return token, data
 
 
@@ -806,18 +808,15 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
 
     def _biz(token: str) -> Dict[str, Any]:
         say("📋 业务流程")
-        # 先查会员资料：无手机号 → 小程序未授权，不误报 JS/token 问题
         prof = query_member_profile(token, proxies)
         mobile = prof.get("mobile") or ""
         acc["phone"] = mobile
-        extras.append(f"手机 {mask_phone(mobile) if mobile else '未授权'}")
+        extras.append(f"手机 {mask_phone(mobile) if mobile else '未知/未返回'}")
+        print(f"ℹ️ 会员资料 ok={prof.get('ok')} mobile={mask_phone(mobile) if mobile else '无'} msg={clean_line(prof.get('msg') or '')[:60]}")
         if not mobile:
-            say("❌ 小程序未授权手机号（会员资料无 mobile）")
-            extras.append("小程序未授权手机号")
-            acc["status"] = phone_unauthorized_status()
-            acc["error"] = "小程序未授权手机号"
-            acc["success"] = False
-            return acc
+            # 不直接断言一定是未授权：资料接口失败也可能无 mobile
+            say("⚠️ 会员资料未返回手机号（可能是：未在益禾堂小程序授权，或该 openid 不属于本小程序，或资料接口异常）")
+            extras.append("资料无手机号，先继续尝试签到")
 
         activity_url = get_redirect_url(token, proxies)
         say(f"ℹ️ 活动地址已获取（len={len(activity_url)}）")
@@ -829,10 +828,11 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
         time.sleep(random.uniform(0.8, 1.6))
         key = get_sign_token(cookie, proxies)
         if not key:
-            # 有手机仍拿不到签到 token 时，优先提示未授权/未开通会员活动，而非 JS 细节
-            say("❌ 未取到签到 token（常见原因：小程序未授权手机号/未开通会员活动，而非仅 JS 解析）")
-            extras.append("未取到签到token")
-            raise RuntimeError(phone_unauthorized_status())
+            if not mobile:
+                say("❌ 未取到签到 token；且资料无手机号 → 请在【益禾堂】小程序内用该 openid 授权手机号")
+                raise RuntimeError(phone_unauthorized_status())
+            say("❌ 未取到签到 token（资料有手机，可能是活动未开通/JS 换键/会话不足）")
+            raise RuntimeError("未取到签到 token（请确认益禾堂会员活动是否可签，或稍后再试）")
         say("✅ 签到 token 已获取")
         time.sleep(random.uniform(0.8, 1.6))
         ok, status, gain = do_sign(cookie, key, proxies)
