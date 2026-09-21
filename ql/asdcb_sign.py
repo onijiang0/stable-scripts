@@ -678,7 +678,7 @@ def main() -> int:
 
     results: List[Dict[str, Any]] = []
     for i, openid in enumerate(openids, 1):
-        log_account(i, len(openids), mask_ref(openid))
+        log_account(i, len(openids), f"openid:{mask_ref(openid)}")
         try:
             res = Account(i, openid, args.dry_run).run()
         except Exception as e:
@@ -687,7 +687,7 @@ def main() -> int:
                 "phone": "",
                 "status": f"执行失败 ❌ ({clean_line(e)[:40]})",
                 "reward": "-",
-                "extra": [f"ref {mask_ref(openid)}"],
+                "extra": [f"openid：{mask_ref(openid)}"],
                 "error": clean_line(e),
                 "success": False,
             }
