@@ -164,7 +164,7 @@ def http(method: str, url: str, **kwargs) -> requests.Response:
     return direct_session().request(method, url, **kwargs)
 
 
-def common_headers(token: str = "", *, sign: str = "", ts: str = "") -> Dict[str, str]:
+def common_headers(token: str = "", *, sign: str = "", ts: str = "", open_id: str = "") -> Dict[str, str]:
     import uuid as _uuid
     h = {
         "User-Agent": UA,
@@ -180,7 +180,51 @@ def common_headers(token: str = "", *, sign: str = "", ts: str = "") -> Dict[str
         h["sign"] = sign
     if token:
         h["token"] = token
+    if open_id:
+        h["openId"] = open_id
+        h["openid"] = open_id
     return h
+
+
+# 模块级：登录返回的 openId（部分网关校验）
+_LOGIN_OPENID = ""
+
+
+def extract_open_id(data: Any) -> str:
+    if isinstance(data, dict):
+        for src in (data.get("result"), data.get("data"), data):
+            if isinstance(src, dict):
+                for k in ("openId", "openid", "unionId"):
+                    if src.get(k):
+                        return str(src.get(k))
+    return ""
+
+
+def api_get(path: str, token: str, shop_id: str = "") -> Dict[str, Any]:
+    """GET：先与包内一致 path+data(shopId) 签名；URL 拼 shopId 查询串。"""
+    sid = str(shop_id or SHOP_ID)
+    ts = int(time.time() * 1000)
+    params = {"shopId": sid}
+    sign, _ = compute_sign(params, ts, is_post=False)
+    url = path if path.startswith("http") else f"{BASE_URL}{path}"
+    sep = "&" if "?" in url else "?"
+    url_q = f"{url}{sep}shopId={sid}"
+    headers = common_headers(token, sign=sign, ts=str(ts), open_id=_LOGIN_OPENID)
+    try:
+        r = http("GET", url_q, headers=headers)
+        data = r.json() if r.content else {}
+        if not isinstance(data, dict):
+            data = {"success": False, "msg": clean_line(data)}
+        data["_http"] = r.status_code
+        return data
+    except Exception as e:
+        msg = clean_line(e) or str(e)
+        kind = "网络不可达"
+        if re.search(r"ssl|certificate", msg, re.I):
+            kind = "HTTPS异常"
+        elif re.search(r"timeout|timed out", msg, re.I):
+            kind = "请求超时"
+        return {"success": False, "msg": f"{kind}: {msg[:80]}"}
 
 
 def get_wx_code(openid: str) -> str:
@@ -250,23 +294,22 @@ def extract_shop_id(data: Any) -> str:
 
 
 def api_get(path: str, token: str, shop_id: str = "") -> Dict[str, Any]:
-    """GET：URL 与 sign 都使用同一 shopId；包内 url 不拼 query，data={shopId}。"""
+    """GET：先与包内一致 path+data(shopId) 签名；URL 拼 shopId 查询串。"""
     sid = str(shop_id or SHOP_ID)
+    ts = int(time.time() * 1000)
+    params = {"shopId": sid}
+    sign, _ = compute_sign(params, ts, is_post=False)
+    url = path if path.startswith("http") else f"{BASE_URL}{path}"
+    sep = "&" if "?" in url else "?"
+    url_q = f"{url}{sep}shopId={sid}"
+    headers = common_headers(token, sign=sign, ts=str(ts), open_id=_LOGIN_OPENID)
     try:
-        ts = int(time.time() * 1000)
-        params = {"shopId": sid}
-        sign, _ = compute_sign(params, ts, is_post=False)
-        # 与包内一致：path 不带 query，query 与签名字段同源
-        url = path if path.startswith("http") else f"{BASE_URL}{path}"
-        # 仍带上 query，便于网关识别；签名用同一 shopId
-        sep = "&" if "?" in url else "?"
-        url_q = f"{url}{sep}shopId={sid}"
-        r = http("GET", url_q, headers=common_headers(token, sign=sign, ts=str(ts)))
-        try:
-            data = r.json()
-        except Exception:
-            data = {"success": False, "msg": clean_line(r.text)[:80]}
-        return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
+        r = http("GET", url_q, headers=headers)
+        data = r.json() if r.content else {}
+        if not isinstance(data, dict):
+            data = {"success": False, "msg": clean_line(data)}
+        data["_http"] = r.status_code
+        return data
     except Exception as e:
         msg = clean_line(e) or str(e)
         kind = "网络不可达"
@@ -315,10 +358,14 @@ def login_by_code(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     }
     data = api_post("/mobile/wxAppLogin", "", payload)
     token = extract_token(data)
+    global _LOGIN_OPENID
+    _LOGIN_OPENID = extract_open_id(data)
     code_v = data.get("code") if data.get("code") is not None else ""
+    result_keys = list((data.get("result") or {}).keys())[:12] if isinstance(data.get("result"), dict) else []
     print(
         f"ℹ️ 登录响应 success={data.get('success')} code={code_v} "
-        f"msg={clean_line(data.get('msg') or data.get('message') or '')[:50] or ('ok' if token else '无')}"
+        f"resultKeys={result_keys} openId={'有' if _LOGIN_OPENID else '无'} "
+        f"msg={clean_line(data.get('msg') or data.get('message') or '')[:40] or ('ok' if token else '无')}"
     )
     if not token:
         return None, {"message": clean_line(data.get("msg") or "登录响应未返回 mobileToken")}
@@ -413,7 +460,10 @@ def query_user(token: str, shop_id: str = "") -> Tuple[str, str]:
     """返回 (显示名, 脱敏手机)"""
     resp = api_get("/mobile/customer/initMy", token, shop_id)
     if not is_ok(resp):
-        say(f"⚠️ 用户信息: {err_msg(resp)}")
+        say(
+            f"⚠️ 用户信息: code={resp.get('code')} msg={err_msg(resp)} "
+            f"http={resp.get('_http')}"
+        )
         return "未知用户", ""
     customer = (resp.get("result") or {}).get("customer") or {}
     name = str(customer.get("customerName") or "未知用户")
@@ -424,7 +474,7 @@ def query_user(token: str, shop_id: str = "") -> Tuple[str, str]:
 def get_activity_id(token: str, shop_id: str = "") -> str:
     resp = api_get("/mobile/customer/queryMobilePersonCenterTemplateByShopId", token, shop_id)
     if not is_ok(resp):
-        say(f"⚠️ 获取模板失败: {err_msg(resp)}")
+        say(f"⚠️ 获取模板失败: code={resp.get('code')} msg={err_msg(resp)}")
         return ""
     views = (resp.get("result") or {}).get("views") or []
     component = next(
