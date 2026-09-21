@@ -389,52 +389,6 @@ def clear_cached_token(openid: str) -> None:
     print("🗑️ 已删除本地 token 缓存")
 
 
-def api_get(url: str, token: str) -> Dict[str, Any]:
-    try:
-        ts = int(time.time() * 1000)
-        parsed = url.split("?", 1)
-        query: Dict[str, Any] = {}
-        if len(parsed) > 1:
-            for pair in parsed[1].split("&"):
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                    query[k] = v
-        sign, _ = compute_sign(query, ts, is_post=False)
-        r = http("GET", url, headers=common_headers(token, sign=sign, ts=str(ts)))
-        data = r.json()
-        return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
-    except Exception as e:
-        msg = clean_line(e) or str(e)
-        kind = "网络不可达"
-        if re.search(r"ssl|certificate", msg, re.I):
-            kind = "HTTPS异常"
-        elif re.search(r"timeout|timed out", msg, re.I):
-            kind = "请求超时"
-        return {"success": False, "msg": f"{kind}: {msg[:80]}"}
-
-
-def api_post(url: str, token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """POST：body 字节流必须与签名所用 JSON 字符串一致（禁止 requests json= 重序列化）。"""
-    try:
-        ts = int(time.time() * 1000)
-        sign, body_str = compute_sign(payload or {}, ts, is_post=True)
-        headers = common_headers(token, sign=sign, ts=str(ts))
-        r = http("POST", url, headers=headers, data=body_str.encode("utf-8"))
-        try:
-            data = r.json()
-        except Exception:
-            data = {"success": False, "msg": clean_line(r.text)[:80]}
-        return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
-    except Exception as e:
-        msg = clean_line(e) or str(e)
-        kind = "网络不可达"
-        if re.search(r"ssl|certificate", msg, re.I):
-            kind = "HTTPS异常"
-        elif re.search(r"timeout|timed out", msg, re.I):
-            kind = "请求超时"
-        return {"success": False, "msg": f"{kind}: {msg[:80]}"}
-
-
 def login_with_cache(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     cached = read_cached_token(openid)
     if cached:
