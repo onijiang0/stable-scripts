@@ -22,26 +22,28 @@
 # 3. 用户信息脱敏展示；个人中心模板解析签到 activityId；签到+积分
 # 4. send_notify 统一简报；平台参数写脚本默认值
 #
-# 契约（appid wx12e1cb3b09a0e6f0，mall-mobile-v6.vecrp.com）：
+# 契约（appid wx12e1cb3b09a0e6f0，mall-mobile-v6.vecrp.com/mobile）：
 # code     POST {wx_server_url}/wx/code auth:{wx_auth} json:{openid,appid}
 # 登录     POST /mobile/wxAppLogin
-#          body {code,appid,shopId,envVersion,isEnterpriseWx,...} -> token
-#          （源脚本：同平台 vecrp 推断端点，失败需抓包）
+#          body {code,appid,shopId,envVersion,isEnterpriseWx,scene,referrerInfo}
+#          -> result.mobileToken / result.openId / result.shopId
+# 请求头   appid / token / ts / startTime / sign / X-TracedId
+# sign     POST: sha1_hex(排序拼接 body=JSON.stringify(req)+secretKey+ts)
+#          密钥写在脚本默认值（包内逆向，非账号密钥）
 # 用户     GET  /mobile/customer/initMy?shopId=100656040
 # 模板     GET  /mobile/customer/queryMobilePersonCenterTemplateByShopId?shopId=
 #          componentId=WHXG8614883，link.path 签到页取 activityId
 # 签到     POST /mobile/activity/sign/sign
-#          body {shopId,activityId,signDate:YYYY-MM-DD}
-#          success==true 为成功；result.integral 为本次积分
+#          body {shopId,activityId,signDate} -> success + result.integral
 # 积分     GET  /mobile/customer/getMyAllPoint?shopId= -> result[0].score
-# 判定     vecrp：data.success == true
+# 判定     success == true；token 字段为 mobileToken
 #
 # 踩坑：
-# 1. 原脚本有 token 缓存：失效必须删缓存再 code 重登后重跑
-# 2. shopId/componentId/签到页 path 为平台配置，已写入脚本
-# 3. activityId 运行时从模板解析，不写死（活动会变）
-# 4. 登录接口为推断；失败看日志 msg，必要时抓包 /mobile/wxAppLogin
-# 5. 账号相关只改环境变量；日志手机 ****，openid 截断
+# 1. 无 sign/ts 头时接口回「当前请求异常」
+# 2. 原脚本有 token 缓存：失效删缓存再 code 重登后重跑
+# 3. shopId/componentId/secretKey 已从包内回填脚本默认值
+# 4. activityId 运行时从模板解析，不写死
+# 5. 账号相关只改环境变量；日志脱敏
 # ------------------------------------------
 # */
 
@@ -94,6 +96,8 @@ POINT_URL = f"{BASE_URL}/mobile/customer/getMyAllPoint"
 SHOP_ID = "100656040"
 SIGN_COMPONENT_ID = "WHXG8614883"
 SIGN_PAGE_PATH = "/pages/ehd/activities/signIn/index"
+# 包内逆向请求签名密钥（非账号密钥）
+SECRET_KEY = "R6WbJ830wNsEdjH9GumwKYiYxHz0K9QD"
 REQUEST_TIMEOUT = 30
 
 UA = (
@@ -101,6 +105,29 @@ UA = (
     "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 "
     "MicroMessenger/7.0.20.1781 NetType/WIFI MiniProgramEnv/Windows WindowsWechat"
 )
+
+
+def _sha1_hex(text: str) -> str:
+    import hashlib
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def compute_sign(payload: Dict[str, Any], ts: int, is_post: bool = True) -> str:
+    """vecrp：POST 用 body=json + secretKey + ts，键值串排序后拼接再 sha1。"""
+    import json as _json
+    if is_post:
+        bag = {
+            "body": _json.dumps(payload if payload is not None else {}, separators=(",", ":"), ensure_ascii=False),
+            "secretKey": SECRET_KEY,
+            "ts": ts,
+        }
+    else:
+        bag = dict(payload or {})
+        bag["secretKey"] = SECRET_KEY
+        bag["ts"] = ts
+    parts = [f"{k}{bag[k]}" for k in bag]
+    parts.sort()
+    return _sha1_hex("".join(parts))
 
 
 def say(msg: str) -> None:
@@ -141,15 +168,20 @@ def http(method: str, url: str, **kwargs) -> requests.Response:
     return direct_session().request(method, url, **kwargs)
 
 
-def common_headers(token: str = "") -> Dict[str, str]:
+def common_headers(token: str = "", *, sign: str = "", ts: str = "") -> Dict[str, str]:
+    import uuid as _uuid
     h = {
         "User-Agent": UA,
         "Content-Type": "application/json;charset=UTF-8",
         "Accept": "*/*",
         "appid": APPID,
-        "ts": str(int(time.time() * 1000)),
+        "ts": ts or str(int(time.time() * 1000)),
+        "startTime": str(int(time.time() * 1000)),
         "Referer": f"https://servicewechat.com/{APPID}/132/page-frame.html",
+        "X-TracedId": str(_uuid.uuid4()),
     }
+    if sign:
+        h["sign"] = sign
     if token:
         h["token"] = token
     return h
@@ -185,32 +217,25 @@ def err_msg(data: Any) -> str:
     return clean_line(data)
 
 
-def is_token_expired(data: Any) -> bool:
-    msg = str(err_msg(data) or "")
-    return bool(re.search(r"token|登录失效|未登录|未授权|请重新登录|过期|401", msg, re.I))
-
-
 def extract_token(data: Any) -> Optional[str]:
+    """包内为 result.mobileToken；兼容 data.token 等。"""
     if not isinstance(data, dict):
         return None
-    cands = [data.get("token"), data.get("mobileToken"), data.get("accessToken"), data.get("access_token")]
-    for key in ("data", "result"):
+    cands = [
+        data.get("mobileToken"),
+        data.get("token"),
+        data.get("accessToken"),
+        data.get("access_token"),
+    ]
+    for key in ("result", "data"):
         inner = data.get(key)
         if isinstance(inner, dict):
             cands += [
-                inner.get("token"),
                 inner.get("mobileToken"),
+                inner.get("token"),
                 inner.get("accessToken"),
                 inner.get("access_token"),
             ]
-            user = inner.get("user") or inner.get("customer")
-            if isinstance(user, dict):
-                cands += [
-                    user.get("token"),
-                    user.get("mobileToken"),
-                    user.get("accessToken"),
-                    user.get("access_token"),
-                ]
     for c in cands:
         if c and c != "null":
             return str(c)
@@ -260,7 +285,7 @@ def read_cached_token(openid: str) -> Optional[str]:
                 exp_ms = float(expire)
             else:
                 exp_ms = datetime.fromisoformat(str(expire)).timestamp() * 1000
-            if time.time() * 1000 >= exp_ms - 3600 * 1000:
+            if time.time() * 1000 >= exp_ms - 600 * 1000:
                 return None
     except Exception:
         pass
@@ -268,21 +293,7 @@ def read_cached_token(openid: str) -> Optional[str]:
 
 
 def write_cached_token(openid: str, token: str, raw_login: Dict[str, Any]) -> None:
-    expire = None
-    if isinstance(raw_login, dict):
-        inner = raw_login.get("data") or raw_login.get("result")
-        if isinstance(inner, dict):
-            expire = inner.get("expireTime") or inner.get("expire_time")
-            expires_in = inner.get("expiresIn")
-            if not expire and isinstance(expires_in, (int, float)) and expires_in > 0:
-                expire = datetime.fromtimestamp(time.time() + expires_in).isoformat()
-    if not expire:
-        expire = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
-    elif not isinstance(expire, str):
-        try:
-            expire = datetime.fromtimestamp(float(expire) / 1000.0).isoformat()
-        except Exception:
-            expire = datetime.fromtimestamp(time.time() + 24 * 3600).isoformat()
+    expire = datetime.fromtimestamp(time.time() + 6000).isoformat()
     cache = load_cache()
     cache[cache_key(openid)] = {"token": token, "expireTime": expire, "updateTime": datetime.now().isoformat()}
     save_cache(cache)
@@ -297,7 +308,17 @@ def clear_cached_token(openid: str) -> None:
 
 def api_get(url: str, token: str) -> Dict[str, Any]:
     try:
-        r = http("GET", url, headers=common_headers(token))
+        # GET sign：params 并入 secretKey/ts（按包内逻辑，业务 GET 也可带 query）
+        ts = int(time.time() * 1000)
+        parsed = url.split("?", 1)
+        query: Dict[str, Any] = {}
+        if len(parsed) > 1:
+            for pair in parsed[1].split("&"):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    query[k] = v
+        sign = compute_sign(query, ts, is_post=False)
+        r = http("GET", url, headers=common_headers(token, sign=sign, ts=str(ts)))
         data = r.json()
         return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
     except Exception as e:
@@ -312,7 +333,9 @@ def api_get(url: str, token: str) -> Dict[str, Any]:
 
 def api_post(url: str, token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        r = http("POST", url, headers=common_headers(token), json=payload)
+        ts = int(time.time() * 1000)
+        sign = compute_sign(payload or {}, ts, is_post=True)
+        r = http("POST", url, headers=common_headers(token, sign=sign, ts=str(ts)), json=payload or {})
         data = r.json()
         return data if isinstance(data, dict) else {"success": False, "msg": clean_line(data)}
     except Exception as e:
@@ -337,17 +360,18 @@ def login_by_code(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     payload = {
         "code": code,
         "appid": APPID,
-        "shopId": None,
+        "shopId": SHOP_ID,
         "envVersion": "",
         "isEnterpriseWx": False,
         "scene": "",
         "referrerInfo": "",
     }
     data = api_post(LOGIN_URL, "", payload)
-    print(f"ℹ️ 登录响应 success={data.get('success')} msg={err_msg(data)[:60] if not data.get('success') else 'ok'}")
     token = extract_token(data)
+    msg = err_msg(data) if not token else "ok"
+    print(f"ℹ️ 登录响应 success={data.get('success')} msg={clean_line(msg)[:60]}")
     if not token:
-        return None, {"message": err_msg(data) or "登录响应未返回 token"}
+        return None, {"message": msg or "登录响应未返回 mobileToken"}
     return token, data
 
 
@@ -459,7 +483,7 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
         token, mode = login_with_cache(openid)
         extras.append(mode)
         if not token:
-            acc["status"] = "登录失败 ❌（登录接口为推断，可抓包核对）"
+            acc["status"] = "登录失败 ❌"
             acc["error"] = "登录失败"
             return acc
         say(f"✅ 登录成功 token={mask_token(token)}")
