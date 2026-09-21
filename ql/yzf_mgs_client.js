@@ -6,7 +6,7 @@
 // BestPay MGS client for 翼支付签到专区 (Node)
 // Sign: md5(secretKey + "&Operation-Type=" + op + "&Request-Data=" + b64(JSON.stringify([data])) + "&Ts=" + ts)
 // Body: encryptType=2 pack via mgssdk WASM encrypt
-// 密钥不入库：运行时读 YZF_SECRET / YZF_MGS_SECRET
+// 密钥：平台业务参数（与账号无关），已内置脚本默认值；如需覆盖用 YZF_SECRET / YZF_MGS_SECRET
 const https = require("https");
 const zlib = require("zlib");
 const crypto = require("crypto");
@@ -122,7 +122,7 @@ function md5hex(s) {
 
 function rpcSign(operationType, data, ts) {
   if (!SECRET) {
-    throw new Error("缺少 YZF_SECRET（勿写进仓库，青龙环境变量配置）");
+    throw new Error("缺少 YZF_SECRET（平台签名密钥，默认值已在脚本内，如需覆盖请在青龙环境变量配置）");
   }
   const Q = JSON.stringify([data]);
   const b64 = Buffer.from(Q, "utf8").toString("base64");
