@@ -417,6 +417,14 @@ class Account:
         cache.pop(self.key, None)
         write_cache(cache)
         self.token = ""
+        print("🗑️ 已删除本地 token 缓存")
+
+    def reset_auth_and_login(self) -> None:
+        """缓存/token 失效：删缓存 → 重新 code 登录。"""
+        self.clear_cache()
+        self.token = ""
+        print("🔐 重新获取 code 并登录")
+        self.login()
 
     def validate_token(self) -> bool:
         try:
@@ -559,29 +567,34 @@ class Account:
         return "7.9折券：需按服务端价格/库存校验，当前未自动兑换"
 
     def run(self) -> Dict[str, Any]:
-        ref = self.openid
-        extras: List[str] = [f"ref {mask_ref(ref)}"]
+        extras: List[str] = [f"openid：{mask_ref(self.openid)}"]
         account = f"账号{self.index}"
         phone = ""
-        status = "-"
-        reward = "-"
-        success_flag = False
-        error = ""
+        used_cache = False
+        login_mode = "code登录"
 
         if self.load_cache():
-            print("ℹ️ 使用 token 缓存")
-            if not self.validate_token():
-                self.clear_cache()
-                print("⚠️ 缓存失效，重新登录")
-            extras.append("token缓存")
+            print("ℹ️ token缓存登录")
+            if self.validate_token():
+                used_cache = True
+                login_mode = "token缓存登录"
+                extras.append("token缓存登录")
+            else:
+                print("⚠️ 缓存 token 失效，自动删除并 code 重登")
+                self.reset_auth_and_login()
+                login_mode = "缓存失效 code重登"
+                extras.append("缓存失效 code重登")
         if not self.token:
             self.login()
+            if not used_cache and not any("code" in x for x in extras):
+                extras.append("code登录")
+                login_mode = "code登录"
         account = self.user_name or account
         phone = self.mobile
         extras.append(f"手机 {mask_phone(phone) if phone else '-'}")
+        extras.append(f"登录方式 {login_mode}")
 
         def _do() -> Dict[str, Any]:
-            nonlocal status, reward, success_flag
             sign_info = self.run_sign()
             day_label = sign_info.get("day_label") or "连续"
             days = sign_info.get("days")
@@ -597,9 +610,10 @@ class Account:
                 reward = f"+{gain:g}"
             elif self.points_after is not None:
                 reward = f"积分 {self.points_after:g}"
+            else:
+                reward = "-"
             extras.append(self.run_member_day())
             extras.append(self.run_79())
-            success_flag = True
             return {
                 "account": account,
                 "phone": phone,
@@ -611,53 +625,39 @@ class Account:
                 "success": True,
             }
 
-        try:
-            return _do()
-        except ApiError as e:
-            if not token_error(e):
-                error = clean_line(e)
-                status = f"失败 ❌ ({error[:40]})"
-                say(f"❌ {error}")
-                return {
-                    "account": account,
-                    "phone": phone,
-                    "status": status,
-                    "reward": reward,
-                    "extra": extras,
-                    "error": error,
-                    "success": False,
-                }
-            print("⚠️ 登录失效，重试")
-            self.clear_cache()
-            self.login()
-            account = self.user_name or account
-            phone = self.mobile
-            try:
-                return _do()
-            except Exception as e2:
-                error = clean_line(e2)
-                say(f"❌ 重试失败: {error}")
-                return {
-                    "account": account,
-                    "phone": phone,
-                    "status": f"重试失败 ❌ ({error[:40]})",
-                    "reward": "-",
-                    "extra": extras,
-                    "error": error,
-                    "success": False,
-                }
-        except Exception as e:
-            error = clean_line(e)
-            say(f"❌ 异常: {error}")
+        def _fail(msg: str, status: str) -> Dict[str, Any]:
             return {
                 "account": account,
                 "phone": phone,
-                "status": f"异常 ❌ ({error[:40]})",
+                "status": status,
                 "reward": "-",
                 "extra": extras,
-                "error": error,
+                "error": msg,
                 "success": False,
             }
+
+        try:
+            return _do()
+        except ApiError as e:
+            err_msg = clean_line(e)
+            if not token_error(e):
+                say(f"❌ {err_msg}")
+                return _fail(err_msg, f"失败 ❌ ({err_msg[:40]})")
+            print("⚠️ token 失效，删除缓存 → code 重登 → 重跑")
+            extras.append("token失效 code重登")
+            try:
+                self.reset_auth_and_login()
+                account = self.user_name or account
+                phone = self.mobile
+                return _do()
+            except Exception as e2:
+                err2 = clean_line(e2)
+                say(f"❌ 重登重跑失败: {err2}")
+                return _fail(err2, f"重登重跑失败 ❌ ({err2[:40]})")
+        except Exception as e:
+            err_msg = clean_line(e)
+            say(f"❌ 异常: {err_msg}")
+            return _fail(err_msg, f"异常 ❌ ({err_msg[:40]})")
 
 
 def main() -> int:
