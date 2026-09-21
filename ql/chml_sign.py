@@ -259,26 +259,64 @@ def clear_cached_token(openid: str) -> None:
 def api_post(url: str, token: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     try:
         r = http("POST", url, headers=common_headers(token), json=payload or {})
-        data = r.json()
-        if isinstance(data, dict) and "status_code" not in data:
-            data = dict(data)
-            data.setdefault("status_code", r.status_code)
-        return data if isinstance(data, dict) else {"status_code": r.status_code, "message": str(data)}
+        status = r.status_code
+        try:
+            data = r.json()
+        except Exception:
+            data = {"message": clean_line(r.text)[:80]}
+        if not isinstance(data, dict):
+            data = {"message": str(data)}
+        data.setdefault("status_code", status)
+        return data
     except Exception as e:
-        return {"status_code": -1, "message": clean_line(e)}
+        msg = clean_line(e) or str(e)
+        kind = "网络不可达"
+        if re.search(r"SSLError|ssl|certificate", msg, re.I):
+            kind = "HTTPS/证书异常"
+        elif re.search(r"timed out|timeout", msg, re.I):
+            kind = "请求超时"
+        return {"status_code": -1, "message": f"{kind}: {msg[:80]}"}
 
 
 def is_success(resp: Dict[str, Any]) -> bool:
+    if resp.get("code") in (0, "0", 200, "200") and resp.get("success") in (True, None):
+        if resp.get("success") is False:
+            return False
+        if resp.get("status_code") in (200, 2000, None) or resp.get("code") in (0, "0", 200, "200"):
+            msg = str(resp.get("message") or "")
+            if re.search(r"失败|过期|错误", msg):
+                return False
+            return True
     if resp.get("status_code") == 200 or str(resp.get("statusCode")) == "200":
+        msg = str(resp.get("message") or "")
+        if re.search(r"token过期|解析失败|重新登录", msg):
+            return False
         return True
     return "成功" in str(resp.get("message") or "")
 
 
+def is_token_expired(resp: Dict[str, Any]) -> bool:
+    msg = str(resp.get("message") or resp.get("msg") or "")
+    code = str(resp.get("code") if resp.get("code") is not None else "")
+    return bool(
+        re.search(r"token过期|解析失败|请重新登录|未登录|401", msg)
+        or code in ("401", "40101", "100401")
+        or resp.get("status_code") == 401
+    )
+
+
 def token_valid(token: str) -> bool:
     resp = api_post(CALENDAR_URL, token, {})
+    if is_token_expired(resp):
+        return False
     if resp.get("status_code") == 200:
         return True
     if resp.get("status_code") in (404, 405) and not str(resp.get("message") or "").startswith("JSON"):
+        return True
+    if is_success(resp):
+        return True
+    # 网络失败时不把缓存判死
+    if resp.get("status_code") == -1:
         return True
     return False
 
@@ -334,12 +372,19 @@ def login_with_cache(openid: str) -> Tuple[Optional[str], str]:
 
 def do_sign(token: str) -> Tuple[bool, str]:
     resp = api_post(SIGN_URL, token, {})
-    print(f"ℹ️ 签到响应 status_code={resp.get('status_code')} msg={clean_line(resp.get('message') or resp.get('msg') or '')[:60]}")
+    msg = clean_line(resp.get("message") or resp.get("msg") or "")
+    print(
+        f"ℹ️ 签到响应 status_code={resp.get('status_code')} "
+        f"code={resp.get('code')} msg={msg[:60] or '无'}"
+    )
+    if is_token_expired(resp):
+        return False, f"{msg[:40] or 'token过期'} ❌"
+    if resp.get("status_code") == -1:
+        return False, f"{msg[:50] or '网络不可达'} ❌"
     if is_success(resp):
-        msg = clean_line(resp.get("message") or resp.get("msg") or "签到成功")
-        return True, f"{msg} ✅" if "成功" in msg or "已签" in msg else f"{msg} ✅"
-    msg = clean_line(resp.get("message") or resp.get("msg") or "签到失败")
-    return False, f"{msg[:40]} ❌"
+        text = msg or "签到成功"
+        return True, f"{text} ✅" if ("成功" in text or "已签" in text) else f"{text} ✅"
+    return False, f"{(msg or '签到失败')[:40]} ❌"
 
 
 def run_account(openid: str, index: int, total: int, manual_token: Optional[str] = None) -> Dict[str, Any]:
@@ -355,46 +400,68 @@ def run_account(openid: str, index: int, total: int, manual_token: Optional[str]
     }
     print(f"━━━━━━━━━━━━━━━━━━━━\n👤 账号 {index}/{total} {mask_id(openid, 6)}\n━━━━━━━━━━━━━━━━━━━━")
 
-    def _sign(token: str, mode: str) -> Dict[str, Any]:
+    def _finish(ok: bool, status: str, mode: str) -> Dict[str, Any]:
         extras.append(mode)
-        say(f"✅ 登录成功 token={mask_token(token)}")
-        ok, status = do_sign(token)
         acc["status"] = status
         acc["success"] = ok
         if not ok:
             acc["error"] = status
         return acc
 
-    def _fail(msg: str, status: str) -> Dict[str, Any]:
-        acc["status"] = status
-        acc["error"] = msg
-        acc["success"] = False
-        return acc
+    def _try_code_login() -> Tuple[Optional[str], str]:
+        token, mode = login_with_cache(openid)
+        return token, mode
+
+    # 1) chmlck 抓包 token（可能过期）
+    if manual_token:
+        print("🔑 使用 chmlck 抓包 token")
+        say(f"✅ token={mask_token(manual_token)}（未校验有效性）")
+        ok, status = do_sign(manual_token)
+        if ok:
+            return _finish(True, status, "chmlck token")
+        if re.search(r"token过期|解析失败|重新登录", status):
+            extras.append("chmlck 已过期")
+            print("⚠️ chmlck token 已过期，尝试 openid code 登录")
+            if openid and not str(openid).startswith("manual:"):
+                try:
+                    token, mode = _try_code_login()
+                    if token:
+                        say(f"✅ 重新登录成功 token={mask_token(token)}")
+                        ok2, status2 = do_sign(token)
+                        return _finish(ok2, status2, f"chmlck过期→{mode}")
+                    return _finish(False, "chmlck过期且 code 登录失败 ❌", "chmlck过期")
+                except Exception as e2:
+                    return _finish(False, f"chmlck过期 code登录异常 ❌ ({clean_line(e2)[:30]})", "chmlck过期")
+            return _finish(False, "chmlck 已过期，请更新抓包 token ❌", "chmlck token")
+        return _finish(False, status, "chmlck token")
+
+    # 2) code + 缓存登录
+    def _sign_flow(token: str, mode: str) -> Dict[str, Any]:
+        say(f"✅ 登录成功 token={mask_token(token)}")
+        ok, status = do_sign(token)
+        return _finish(ok, status, mode)
 
     try:
-        if manual_token:
-            print("🔑 使用 chmlck 抓包 token")
-            return _sign(manual_token, "chmlck token")
-        token, mode = login_with_cache(openid)
+        token, mode = _try_code_login()
         if not token:
-            return _fail("登录失败", "登录失败 ❌（可配置 chmlck）")
-        return _sign(token, mode)
+            return _finish(False, "登录失败 ❌（可配置 chmlck）", "code登录失败")
+        return _sign_flow(token, mode)
     except Exception as e:
         msg = clean_line(e)
         say(f"❌ {msg}")
-        if re.search(r"token|登录|401|未登录", msg, re.I) and not manual_token:
+        if re.search(r"token|登录|401|未登录", msg, re.I):
             say("⚠️ 登录态失效，删除缓存 → code 重登 → 重跑")
             extras.append("登录态失效 code重登")
             try:
                 clear_cached_token(openid)
-                token, mode = login_with_cache(openid)
+                token, mode = _try_code_login()
                 if not token:
-                    return _fail("重登失败", "重登失败 ❌")
-                return _sign(token, mode)
+                    return _finish(False, "重登失败 ❌", "重登失败")
+                return _sign_flow(token, mode)
             except Exception as e2:
                 msg2 = clean_line(e2)
-                return _fail(msg2, f"重登重跑失败 ❌ ({msg2[:40]})")
-        return _fail(msg, f"失败 ❌ ({msg[:40]})")
+                return _finish(False, f"重登重跑失败 ❌ ({msg2[:40]})", "重登重跑失败")
+        return _finish(False, f"失败 ❌ ({msg[:40]})", "异常")
 
 
 def main() -> int:
