@@ -334,14 +334,25 @@ def login_by_code(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     global _LOGIN_OPENID
     _LOGIN_OPENID = extract_open_id(data)
     code_v = data.get("code") if data.get("code") is not None else ""
-    result_keys = list((data.get("result") or {}).keys())[:12] if isinstance(data.get("result"), dict) else []
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    result_keys = list(result.keys())[:12]
+    has_auth_url = bool(result.get("authCenterUrl") or result.get("qyAuthCenterUrl"))
     print(
         f"ℹ️ 登录响应 success={data.get('success')} code={code_v} "
         f"resultKeys={result_keys} openId={'有' if _LOGIN_OPENID else '无'} "
+        f"authCenter={'有' if has_auth_url else '无'} "
         f"msg={clean_line(data.get('msg') or data.get('message') or '')[:40] or ('ok' if token else '无')}"
     )
+    if has_auth_url:
+        print("⚠️ 登录返回 authCenterUrl：需在小程序内完成授权/开卡后，业务接口才能调用")
     if not token:
         return None, {"message": clean_line(data.get("msg") or "登录响应未返回 mobileToken")}
+    # 包内：授权后会拉 getNascentId；纯 HTTP 先尝试一次
+    try:
+        nas = api_get("/mobile/customer/getNascentId", token, extract_shop_id(data))
+        print(f"ℹ️ getNascentId success={nas.get('success')} code={nas.get('code')} msg={err_msg(nas)[:40] or 'ok'}")
+    except Exception:
+        pass
     return token, data
 
 
@@ -412,10 +423,10 @@ def clear_cached_token(openid: str) -> None:
 def login_with_cache(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     cached = read_cached_token(openid)
     if cached:
-        print("ℹ️ token缓存登录")
         if token_valid(cached, SHOP_ID):
+            print("ℹ️ token缓存登录")
             return cached, {"shopId": SHOP_ID}
-        print("⚠️ 缓存 token 失效，自动删除并 code 重登")
+        print("⚠️ 缓存 token 失效，删除后 code 重登")
         clear_cached_token(openid)
         token, raw = login_by_code(openid)
         if token:
@@ -433,10 +444,12 @@ def query_user(token: str, shop_id: str = "") -> Tuple[str, str]:
     """返回 (显示名, 脱敏手机)"""
     resp = api_get("/mobile/customer/initMy", token, shop_id)
     if not is_ok(resp):
-        say(
-            f"⚠️ 用户信息: code={resp.get('code')} msg={err_msg(resp)} "
-            f"http={resp.get('_http')}"
-        )
+        code = str(resp.get("code") if resp.get("code") is not None else "")
+        msg = err_msg(resp)
+        if code == "2025" or "授权失败" in msg:
+            say("⚠️ code=2025 授权失败：请打开特步会员中心小程序完成授权/开卡后重试")
+        else:
+            say(f"⚠️ 用户信息: code={code} msg={msg} http={resp.get('_http')}")
         return "未知用户", ""
     customer = (resp.get("result") or {}).get("customer") or {}
     name = str(customer.get("customerName") or "未知用户")
@@ -447,7 +460,12 @@ def query_user(token: str, shop_id: str = "") -> Tuple[str, str]:
 def get_activity_id(token: str, shop_id: str = "") -> str:
     resp = api_get("/mobile/customer/queryMobilePersonCenterTemplateByShopId", token, shop_id)
     if not is_ok(resp):
-        say(f"⚠️ 获取模板失败: code={resp.get('code')} msg={err_msg(resp)}")
+        code = str(resp.get("code") if resp.get("code") is not None else "")
+        msg = err_msg(resp)
+        if code == "2025" or "授权失败" in msg:
+            say("⚠️ 模板接口 code=2025 授权失败：需在小程序完成授权/开卡")
+        else:
+            say(f"⚠️ 获取模板失败: code={code} msg={msg}")
         return ""
     views = (resp.get("result") or {}).get("views") or []
     component = next(
