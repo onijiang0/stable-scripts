@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
-# @Description: QQ音乐 - 小程序签到/金币/任务/抽奖（smallcat 换 code）
+# @Author: onijiang0
+# @Date: 2026.09.20
+# @Description: QQ音乐 - 小程序签到/金币/任务/抽奖（取码服务换 code）
 # cron: 20 14 * * *
 # ------------------------------------------
 # 变量名：qqyy
@@ -21,7 +23,7 @@
 # 注：推送结果由 send_notify 统一短文案输出
 #
 # 契约（appid wxada7aab80ba27074）：
-# smallcat  POST {wx_server_url}/wx/code  auth:{wx_auth} json:{openid,appid}
+# 取码服务  POST {wx_server_url}/wx/code  auth:{wx_auth} json:{openid,appid}
 #           -> data.code（每账号只调 1 次）
 # 登录      POST https://u.y.qq.com/cgi-bin/musicu.fcg
 #           music.login.LoginServer.Login  body.comm+login.param{code,strAppid}

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
+# @Author: onijiang0
+# @Date: 2026.09.20
 # @Description: 芯享会（心相印）- openid 换微信 code 登录 + 每日签到
 # cron: 35 14 * * *
 # ------------------------------------------
@@ -128,7 +130,7 @@ except Exception:
         return send_notify(task, str(accounts))
 
 
-class Smallcat:
+class CodeService:
     def __init__(self, base: str, auth: str):
         self.base = base.rstrip("/")
         self.s = requests.Session()
@@ -597,7 +599,7 @@ def hengan_run(token: str, proxies=None) -> Dict[str, Any]:
     return out
 
 
-def run_account(openid: str, sm: Smallcat) -> Dict[str, Any]:
+def run_account(openid: str, sm: CodeService) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "openid": openid,
         "success": False,
@@ -650,7 +652,7 @@ def main() -> int:
     if not openids:
         print("缺少 xxy（openid，多账号换行或 & 分隔）")
         return 1
-    sm = Smallcat(sc_base, sc_auth)
+    sm = CodeService(sc_base, sc_auth)
     print(f"{APP_NAME} | {len(openids)}账号")
 
     results: List[Dict[str, Any]] = []

@@ -125,7 +125,7 @@ def sc_post(base: str, auth: str, path: str, body: dict) -> dict:
         return {"status": False, "message": str(e)}
 
 
-def smallcat_material(openid: str) -> dict:
+def code_service_material(openid: str) -> dict:
     """每次运行每 openid 只调 1 次 /wx/code。"""
     base = os.getenv("wx_server_url", "").strip().rstrip("/")
     auth = os.getenv("wx_auth", "").strip()
@@ -229,7 +229,7 @@ def run_account(openid: str, index: int, total: int) -> Dict[str, Any]:
     }
     print(f"━━━━━━━━━━━━━━━━━━━━\n👤 账号 {index}/{total} {mask_id(openid, 6)}\n━━━━━━━━━━━━━━━━━━━━")
     try:
-        material = smallcat_material(openid)
+        material = code_service_material(openid)
         mobile = material.get("mobile") or os.getenv("yzf_phone", "")
         acc["phone"] = mobile
         extras.append(f"wxCode={'有' if material.get('wxCode') else '无'} phoneCode={'有' if material.get('phoneCode') else '无'}")

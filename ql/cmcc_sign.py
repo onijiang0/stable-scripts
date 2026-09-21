@@ -2,21 +2,23 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
+# @Author: onijiang0
+# @Date: 2026.09.15
 # @Description: 中国移动10086签到 - 小程序 SSO 全链路
 # cron: 30 14 * * *
 # ------------------------------------------
 # 变量名：cmcc
-# 变量值：smallcat openid，多账号 & 或换行分隔
+# 变量值：取码服务里的 openid，多账号 & 或换行分隔
 #
 # 依赖：
-#   wx_server_url  必填 smallcat Base
+#   wx_server_url  必填，取码服务地址（Base）
 #   wx_auth        必填 调用 API AUTH（请求头 auth）
 #   cmcc_execute   可选 0=只验登录链不签到；默认 1 执行签到
 #   cmcc_delay_min / cmcc_delay_max  可选 账号间隔随机秒，默认 8~25
 #   cmcc_yx / cmcc_touch_id 可选
 #
 # 链路（源码已核实）：
-#   1 POST {smallcat}/wx/code  appid=wx43aab19a93a3a6f2
+#   1 POST {wx_server_url}/wx/code  appid=wx43aab19a93a3a6f2
 #   2 GET  https://wx.online-cmcc.cn/wmhnewcenter/wechat86-applet/login
 #        header X-WX-Code + Lrsbhbg8 -> sessionId（encryptData 需 AES 解密）
 #   3 POST https://wx.online-cmcc.cn/wmhnewcenter/wechat86-applet/wmhsso?redirectSource=SSO_YQS
@@ -238,7 +240,7 @@ def dig_session(data: Any, key: str) -> str:
     return ""
 
 
-class Smallcat:
+class CodeService:
     def __init__(self, base: str, auth: str):
         self.base = base.rstrip("/")
         self.auth = auth
@@ -274,7 +276,7 @@ def acquire_mark_session(base_url: str, openid: str, yx: str, touch_id: str) -> 
     sm_auth = os.getenv("wx_auth", "").strip()
     if not sm_base or not sm_auth:
         raise RuntimeError("缺少 wx_server_url / wx_auth")
-    sm = Smallcat(sm_base, sm_auth)
+    sm = CodeService(sm_base, sm_auth)
 
     log.info("登录 openid=%s", mask(openid))
     code = sm.wx_code(openid, MP_APPID)
@@ -498,7 +500,7 @@ def main() -> int:
         log.error("缺少 wx_server_url / wx_auth")
         return 1
 
-    sm = Smallcat(base, auth)
+    sm = CodeService(base, auth)
     if openids_raw:
         openids = split_openids(openids_raw)
     else:

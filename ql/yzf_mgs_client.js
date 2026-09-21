@@ -1,3 +1,8 @@
+// ------------------------------------------
+// @Author: onijiang0
+// @Date: 2026.09.21
+// @Description: 翼支付 MGS 客户端（库文件，供 yzf_sign.py 调用，非独立定时任务）
+// ------------------------------------------
 // BestPay MGS client for 翼支付签到专区 (Node)
 // Sign: md5(secretKey + "&Operation-Type=" + op + "&Request-Data=" + b64(JSON.stringify([data])) + "&Ts=" + ts)
 // Body: encryptType=2 pack via mgssdk WASM encrypt

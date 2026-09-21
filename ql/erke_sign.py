@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
-# @Description: 鸿星尔克会员签到 - smallcat openid 换业务登录态 + 每日签到
+# @Author: onijiang0
+# @Date: 2026.09.12
+# @Description: 鸿星尔克会员签到 - 取码服务 openid 换业务登录态 + 每日签到
 # cron: 5 14 * * *
 # ------------------------------------------
 # 变量名：hxek
@@ -19,7 +21,7 @@
 # （自反编译主包；GIC 会员体系；签名密钥可用 ERKE_SECRET 覆盖）
 #
 # 响应：业务接口带 code/errcode，0000/1001/0 视为成功
-# 登录参数  POST smallcat /wx/code  json:{openid, appid} -> data.code (= jcode)
+# 登录参数  POST {wx_server_url}/wx/code  json:{openid, appid} -> data.code (= jcode)
 # 业务登录  POST /on_login.json  form: jcode & openid & scene + 空会员字段 + sign
 #           -> response.memberInfo / enterpriseInfo
 #           含 memberId / enterpriseId / unionid / openid / wxOpenid / cliqueId
@@ -124,7 +126,7 @@ def save_cache(data: Dict[str, Any]) -> None:
         log.warning("缓存写入失败: %s", e)
 
 
-class Smallcat:
+class CodeService:
     def __init__(self, base: str, auth: str, timeout: int = 20):
         self.base = base.rstrip("/")
         self.auth = auth
@@ -141,10 +143,10 @@ class Smallcat:
         r.raise_for_status()
         data = r.json()
         if not data.get("status"):
-            raise RuntimeError(f"smallcat /wx/code 失败: {data.get('message')}")
+            raise RuntimeError(f"取码服务 /wx/code 失败: {data.get('message')}")
         code = (data.get("data") or {}).get("code")
         if not code:
-            raise RuntimeError("smallcat 未返回 code（可能限流）")
+            raise RuntimeError("取码服务未返回 code（可能限流）")
         return code
 
 
@@ -286,7 +288,7 @@ def split_openids(raw: str) -> List[str]:
 
 
 def ensure_login(
-    sm: Smallcat,
+    sm: CodeService,
     erke: Erke,
     openid: str,
     cache: Dict[str, Any],
@@ -306,7 +308,7 @@ def ensure_login(
     return profile
 
 
-def run_one(sm: Smallcat, erke: Erke, openid: str, cache: Dict[str, Any]) -> Dict[str, Any]:
+def run_one(sm: CodeService, erke: Erke, openid: str, cache: Dict[str, Any]) -> Dict[str, Any]:
     name = openid[-8:]
     acc: Dict[str, Any] = {
         "account": name,
@@ -366,7 +368,7 @@ def main() -> int:
         return 1
 
     openids = split_openids(openids_raw)
-    sm = Smallcat(base, auth)
+    sm = CodeService(base, auth)
     erke = Erke(appid, scene)
     cache = load_cache()
 

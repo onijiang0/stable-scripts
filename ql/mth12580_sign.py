@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
+# @Author: onijiang0
+# @Date: 2026.09.12
 # @Description: 12580mth(大参林/ddwhcb) - openid 换业务登录态 + 每日签到 + 抽奖
 # cron: 25 14 * * *
 # ------------------------------------------
@@ -19,7 +21,7 @@
 # （自反编译主包；channelId=mth，routeFix=12580mth/api/wx，client=4）
 #
 # 响应壳：{code:int, msg, data}  code==0 成功；body 可能 AES 再包一层
-# 登录参数  POST smallcat /wx/code  json:{openid, appid} -> data.code
+# 登录参数  POST {wx_server_url}/wx/code  json:{openid, appid} -> data.code
 # 业务登录  POST .../wechatMiniLogin -> data.token / data.uid
 # 签到状态  POST .../memberSignPage
 # 签到      POST .../memberSign
@@ -36,7 +38,7 @@
 #   signtSecret=（逆向小程序所得；可用 MTH_SIGN_SECRET 覆盖）
 #   （仅 gateway.ddwhcb.com / gateway-pre 配置）
 # 登录态缓存 24h；**单次任务内每个 openid 至多调 1 次 /wx/code，失败不重试**。
-# 多账号间隔 sleep，避免触发 smallcat 限流（约 8 code / 90s）。
+# 多账号间隔 sleep，避免触发取码服务限流（约 8 code / 90s）。
 # ------------------------------------------
 # */
 
@@ -172,7 +174,7 @@ class DclApi:
         return resp
 
 
-class Smallcat:
+class CodeService:
     def __init__(self, base: str, auth: str):
         self.base = base.rstrip("/")
         self.s = requests.Session()
@@ -186,7 +188,7 @@ class Smallcat:
             raise RuntimeError(f"/wx/code: {data.get('message')}")
         code = (data.get("data") or {}).get("code")
         if not code:
-            raise RuntimeError("smallcat 未返回 code")
+            raise RuntimeError("取码服务未返回 code")
         return code
 
 
@@ -234,7 +236,7 @@ def login_with_code(jcode: str) -> Tuple[str, str]:
     return token, uid
 
 
-def get_token(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> Tuple[str, str]:
+def get_token(sm: CodeService, openid: str, appid: str, cache: Dict[str, Any]) -> Tuple[str, str]:
     """缓存优先；未命中只调一次 /wx/code，不重试。"""
     key = f"{appid}:{openid}"
     hit = cache.get(key) or {}
@@ -451,7 +453,7 @@ def lottery_draw(api: "DclApi") -> List[str]:
     return lines
 
 
-def run_one(sm: Smallcat, openid: str, appid: str, cache: Dict[str, Any]) -> Dict[str, Any]:
+def run_one(sm: CodeService, openid: str, appid: str, cache: Dict[str, Any]) -> Dict[str, Any]:
     name = openid[-8:]
     acc: Dict[str, Any] = {
         "account": name,
@@ -566,7 +568,7 @@ def main() -> int:
         log.error("缺少 mth12580（openid，多个用 & 分隔）")
         return 1
 
-    sm = Smallcat(base, auth)
+    sm = CodeService(base, auth)
     cache = load_cache()
     accounts: List[Dict[str, Any]] = []
     for oid in split_openids(openids_raw):

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # /*
 # ------------------------------------------
+# @Author: onijiang0
+# @Date: 2026.09.14
 # @Description: iQOO社区 - 签到/浏览/点赞/分享/评论/发帖(聊游戏)/抽奖/积分
 # cron: 10 14 * * *
 # ------------------------------------------
@@ -10,7 +12,7 @@
 # 示例：openid，多账号换行或 &，可 #备注
 #
 # 依赖变量：
-# wx_auth           必填，smallcat 调用 API AUTH
+# wx_auth           必填，取码服务调用 API AUTH
 # wx_server_url     必填，wx_server 地址（勿写进仓库）
 # iqoo_appid        默认 wxcf4266fbc9463132
 # iqoo_browse       脚本内默认 0（已关闭浏览任务）；环境变量可覆盖，但默认不浏览
@@ -21,7 +23,7 @@
 # iqoo_post         默认 1，发帖次数（发到「聊游戏」categoryId=21）
 #
 # ========== 已实现 ==========
-# 1. 登录：smallcat getphonenumber + code -> v3/users/vivo/mini 拿 accessToken
+# 1. 登录：取码服务 getphonenumber + code -> v3/users/vivo/mini 拿 accessToken
 # 2. 签到：POST v3/sign（已签则识别「已经签到」）
 # 3. 点赞：先读今日进度，满 4 停；不跳过已赞帖
 # 4. 分享：先读今日进度，满 4 停
@@ -45,13 +47,13 @@
 #    计入「浏览帖子」（反自动化）。号2 偶发 1/2 多半来自真机。无独立 view 上报接口。
 # 5. 抽奖：同日重复调 luck.draw 仍会成功并消耗任务次数 -> 必须用中奖记录防重
 #    today.draw.count 是任务送的次数，免费第一抽不依赖它（count=0 也能抽）
-# 6. smallcat：/wx/code 约 8次/90s；getphonenumber 会占用该 openid 会话
+# 6. 取码服务：/wx/code 约 8次/90s；getphonenumber 会占用该 openid 会话
 #    不是每个 openid 都能取手机号（有的返回 js-login code empty）
 # 7. thread.list 的 pageData 字段是 threadId；推荐列表字段是 id
 #    v4/categories/{id}/threads 的 Data.data[] 用 id
 # 8. 同日重跑：已签/已抽/已发帖(限1) 会跳过；点赞不因已赞跳过
 #
-# 契约（bbs-api.iqoo.com + smallcat）：
+# 契约（bbs-api.iqoo.com + 取码服务）：
 # 登录  getphonenumber + code -> v3/users/vivo/mini -> accessToken
 # 签到  POST v3/sign
 # 浏览  GET  v4/categories/{id}/threads + GET v3/thread.detail

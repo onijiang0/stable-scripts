@@ -32,17 +32,33 @@
 
 部署顺序：先上传 `tools/`，再上传 `ql/` → `wxapp/`。
 
-### ql/ 脚本一览
+### ql/ 脚本一览（按 cron 执行时间排序）
+
 | 文件 | 目标站点 | 变量名 | cron |
 |---|---|---|---|
+| `oppo_sign.js` | OPPO 小程序 · 会员查询 / 积分签到 / 做任务赚积分 | `oppo` | `21 8 * * *` |
+| `asdcb_sign.py` | 阿水大杯茶 · 每日签到 / 会员日券 / 积分统计 | `asdcb` | `23 11 * * *` |
+| `yht_sign.py` | 益禾堂 · 企迈 code 登录 + 兑吧动态 token 签到 | `yht` | `17 13 * * *` |
 | `erke_sign.py` | 鸿星尔克会员签到 | `hxek` | `5 14 * * *` |
-| `iqoo_sign.py` | iQOO 社区（签到/浏览/点赞/分享/评论/发帖/抽奖/积分） | `iqoo` | `10 14 * * *` |
-| `mth12580_sign.py` | 12580mth（大参林 / ddwhcb）签到 | `mth12580` | `25 14 * * *` |
-| `xboxjlb_sign.py` | Xbox 俱乐部·有赞小程序签到 | `xboxjlb` | `40 14 * * *` |
-| `cmcc_sign.py` | 中国移动 10086 签到（小程序 SSO 全链路 `login` → `wmhsso` → `wmhToken` → `mark`） | `cmcc` | `30 14 * * *` |
-| `oppo_sign.js` | OPPO 小程序会员查询 / 积分签到 / 做任务赚积分 | `oppo` | `21 8 * * *` |
-| `xxy_sign.py` | 芯享会（心相印）code 登录 + 每日签到（hengan 后端） | `xxy` | `35 14 * * *` |
-| `send_notify.py` | Python 侧推送封装，调用 `tools/sendNotify.js` | — | — |
+| `iqoo_sign.py` | iQOO 社区 · 签到/浏览/点赞/分享/评论/发帖/抽奖/积分 | `iqoo` | `10 14 * * *` |
+| `tebu_sign.py` | 特步会员中心 · 微盟 OneCRM 签到 / 积分 | `tebu` | `16 14 * * *` |
+| `qqyy_sign.py` | QQ音乐 · 签到 / 金币 / 任务 / 抽奖 | `qqyy` | `20 14 * * *` |
+| `mth12580_sign.py` | 12580mth（大参林 / ddwhcb）· 签到 + 抽奖 | `mth12580` | `25 14 * * *` |
+| `cmcc_sign.py` | 中国移动 10086 · 小程序 SSO 全链路 | `cmcc` | `30 14 * * *` |
+| `xxy_sign.py` | 芯享会（心相印）· code 登录 + 每日签到 | `xxy` | `35 14 * * *` |
+| `xboxjlb_sign.py` | Xbox 俱乐部 · 有赞小程序签到 | `xboxjlb` | `40 14 * * *` |
+| `yzf_sign.py` | 翼支付（电信 bestpay）· 签到专区 | `yzf` | `22 15 * * *` |
+| `qch_sign.py` | 七彩虹商城 · 每日签到 / 积分 | `qch` | `36 15 * * *` |
+| `hsay_sign.py` | 沪上阿姨 · 企迈 code 登录 + 签到 / 积分 | `hsay` | `41 15 * * *` |
+| `hyjk_sign.py` | 荷叶健康 · 果园打卡 / 浇水 / 任务 / 签到抽奖 | `hyjk` | `27 16 * * *` |
+| `chml_sign.py` | 长虹美菱 · 小程序每日签到 | `chml` | `33 18 * * *` |
+
+### ql/ 库文件（不建定时任务）
+
+| 文件 | 作用 |
+|---|---|
+| `send_notify.py` | Python 侧推送封装，内部调用 `tools/sendNotify.js` |
+| `yzf_mgs_client.js` | 翼支付 MGS 客户端，供 `yzf_sign.py` 调用 |
 
 > 10086 签到原先有三份并行实现（`cmcc_sign.js` / `cmcc_sign.py` / `cmcc_sign_oauth.js`），
 > 变量名同为 `cmcc`，同账号重复启用会互相干扰。已于 2026-09-19 统一为 `cmcc_sign.py`，
