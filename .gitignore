@@ -2,7 +2,8 @@
 .workbuddy/
 
 # 给本地 agent 读的项目说明，不进仓库
-AGENTS.md
+# 项目 agent 说明（无密钥，随仓库提交便于交接）
+# AGENTS.md
 
 # 凭据 / 登录态缓存（青龙脚本运行时会生成）
 .env
