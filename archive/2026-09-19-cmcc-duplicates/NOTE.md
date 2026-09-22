@@ -12,7 +12,7 @@
 |---|---|---|---|---|---|
 | `../../ql/cmcc_sign.py` | **保留** | 小程序 SSO 全链路：`/wx/code` → `wmhnewcenter/wechat86-applet/login` → `wmhsso` → `qwhdmark/{id}` → `mark/do/mark` | `cmcc` | `30 14 * * *` | 2026-09-19 |
 | `cmcc_sign.js` | 归档 | `/qwhdhub/api/mark/do/mark` 直连（qwhdmark 接口，需自行拿 `QWHD_SESSION_TOKEN`） | `cmcc` | `30 8 * * *` | 2026-09-14 |
-| `cmcc_sign_oauth.js` | 归档 | smallcat `/wx/oauth` + 完整跳转链（Node 版，尝试提取 `QWHD_SESSION_TOKEN`） | `cmcc` | `30 8 * * *` | 2026-09-15 |
+| `cmcc_sign_oauth.js` | 归档 | wx_server `/wx/oauth` + 完整跳转链（Node 版，尝试提取 `QWHD_SESSION_TOKEN`） | `cmcc` | `30 8 * * *` | 2026-09-15 |
 
 后两份都是 `cmcc_sign.py` 打通 SSO 链路之前的**过渡试错产物**：`cmcc_sign.js` 是直连接口版，
 `cmcc_sign_oauth.js` 是公众号 OAuth 探路版，都在 SSO 链路稳定后失去价值。

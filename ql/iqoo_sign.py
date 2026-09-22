@@ -13,7 +13,7 @@
 #
 # 依赖变量：
 # wx_auth           必填，取码服务调用 API AUTH
-# wx_server_url     必填，wx_server 地址（勿写进仓库）
+# wx_server_url     必填，取码服务地址（勿写进仓库）
 # iqoo_appid        默认 wxcf4266fbc9463132
 # iqoo_browse       脚本内默认 0（已关闭浏览任务）；环境变量可覆盖，但默认不浏览
 # iqoo_like         默认 4（单日硬顶）；任务前读今日进度，已满则不再点赞
@@ -748,7 +748,7 @@ def main() -> int:
         log.error("缺少 wx_auth")
         return 1
     if not sc:
-        log.error("缺少 wx_server_url（wx_server 地址，勿写进仓库）")
+        log.error("缺少 wx_server_url（取码服务地址，勿写进仓库）")
         return 1
 
     openids = parse_openids(raw)

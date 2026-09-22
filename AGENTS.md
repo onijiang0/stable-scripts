@@ -21,7 +21,7 @@ stable-scripts 给任何 coding agent 用的项目说明。
 # 6. 推送：from send_notify import notify_and_format
 #    notify_and_format(task, accounts, title=..., start_ts=started)
 # 7. cron 10-19 点随机，避开整点/半点
-# 8. 代码/注释不出现 smallcat 字样
+# 8. 代码/注释不出现 wx_server 字样
 # 9. Git 提交用：git -c user.name=mimo -c user.email=bot@local
 # 10. 未要求不要 push；「铺设」=青龙上传 + cron
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * 中国移动10086签到 - smallcat /wx/oauth + 完整跳转链
+ * 中国移动10086签到 - 取码服务 /wx/oauth + 完整跳转链
  * cron: 30 8 * * *
  *
  * 变量：
- *   wx_server_url  smallcat 地址
- *   wx_auth        smallcat AUTH
+ *   wx_server_url  取码服务地址
+ *   wx_auth        取码服务 AUTH
  *   cmcc           openid（& 分隔，留空读全部）
  *   cmcc_cookie    可选，手动 Cookie 逃逸（含 QWHD_SESSION_TOKEN）
  *
  * 契约：
- *   POST {smallcat}/wx/oauth -> data.full_url（业务回调，带 code）
+ *   POST {wx_server}/wx/oauth -> data.full_url（业务回调，带 code）
  *   GET full_url 跟随重定向 -> d.sid cookie
  *   GET /qwhdsso/redirect?sid={d.sid} -> QWHD_SESSION_TOKEN
  *   POST /qwhdhub/api/mark/do/mark
@@ -59,8 +59,8 @@ async function followRedirects(startUrl, cookieMap = {}, maxHops = 20) {
   return { cookies: cookieMap, status, finalUrl: current };
 }
 
-// smallcat /wx/oauth
-async function smallcatOauth(server, auth, openid, redirectUri) {
+// 取码服务 /wx/oauth
+async function codeServerOauth(server, auth, openid, redirectUri) {
   try {
     const resp = await fetch(`${server}/wx/oauth`, {
       method: "POST",
@@ -72,11 +72,11 @@ async function smallcatOauth(server, auth, openid, redirectUri) {
     if (!fullUrl) throw new Error(`无 full_url: ${data?.message || JSON.stringify(data).slice(0, 200)}`);
     return fullUrl;
   } catch (e) {
-    throw new Error(`smallcat /wx/oauth 失败: ${e.message} ${e.cause?.code || e.cause?.message || ""}`);
+    throw new Error(`取码服务 /wx/oauth 失败: ${e.message} ${e.cause?.code || e.cause?.message || ""}`);
   }
 }
 
-// 获取 smallcat 账号列表
+// 获取 取码服务账号列表
 async function getAccounts(server, auth) {
   const resp = await fetch(`${server}/api/accounts`, { headers: { "auth": auth, "User-Agent": UA } });
   const data = await resp.json();
@@ -134,9 +134,9 @@ function interpretSign(raw) {
 async function runOne(server, auth, openid) {
   const activity = `${BASE}/qwhdhub/qwhdmark/${ACTIVITY_ID}?ys=&yx=${YX}&touch_id=${TOUCH_ID}`;
 
-  // 1. smallcat OAuth
-  console.log(`  smallcat /wx/oauth...`);
-  const fullUrl = await smallcatOauth(server, auth, openid, activity);
+  // 1. wx_server OAuth
+  console.log(`  取码服务 /wx/oauth...`);
+  const fullUrl = await codeServerOauth(server, auth, openid, activity);
   console.log(`  full_url: ${fullUrl.slice(0, 100)}...`);
 
   // 2. 跟随 full_url
@@ -195,7 +195,7 @@ async function main() {
   if (openidsRaw) {
     openids = openidsRaw.split(/[\n&]+/).map(s => s.trim()).filter(Boolean);
   } else {
-    console.log("读取 smallcat 账号...");
+    console.log("读取 取码服务账号...");
     openids = await getAccounts(server, auth);
   }
 

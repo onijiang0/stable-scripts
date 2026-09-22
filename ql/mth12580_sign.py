@@ -11,7 +11,7 @@
 # 变量值：wx_server 里的 openid/账号标识，多账号用 & 或换行分隔（可加 #备注）
 #
 # 依赖变量：
-# wx_server_url    必填，wx_server 地址（勿写进仓库）
+# wx_server_url    必填，取码服务地址（勿写进仓库）
 # wx_auth          必填，wx_server 鉴权值（/wx/code 用）
 # mth12580_appid   可选，默认 wx1d6ad6c2412dea5a
 # mth12580_draw    可选，0=关抽奖；默认 1
@@ -562,7 +562,7 @@ def main() -> int:
         log.error("缺少 wx_auth")
         return 1
     if not base:
-        log.error("缺少 wx_server_url（wx_server 地址，勿写进仓库）")
+        log.error("缺少 wx_server_url（取码服务地址，勿写进仓库）")
         return 1
     if not openids_raw:
         log.error("缺少 mth12580（openid，多个用 & 分隔）")

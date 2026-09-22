@@ -12,7 +12,7 @@
 # 示例：openid，多账号换行或 &，可 #备注
 #
 # 依赖变量：
-# wx_server_url  必填，wx_server 地址（勿写进仓库）
+# wx_server_url  必填，取码服务地址（勿写进仓库）
 # wx_auth        必填，wx_server 鉴权值（/wx/code 用）
 #
 # 可选变量：

@@ -12,7 +12,7 @@
 # 示例：openid，多账号换行或 &，可 #备注
 #
 # 依赖变量：
-# wx_server_url  必填，wx_server 地址（勿写进仓库）
+# wx_server_url  必填，取码服务地址（勿写进仓库）
 # wx_auth        必填，wx_server 鉴权值（/wx/code 用）
 # hxek_appid     可选，默认 wxa1f1fa3785a47c7d（鸿星尔克）
 # hxek_scene     可选，默认 1001
@@ -361,7 +361,7 @@ def main() -> int:
         log.error("缺少 wx_auth")
         return 1
     if not base:
-        log.error("缺少 wx_server_url（wx_server 地址，勿写进仓库）")
+        log.error("缺少 wx_server_url（取码服务地址，勿写进仓库）")
         return 1
     if not openids_raw:
         log.error("缺少 hxek（openid，多个用 & 分隔）")
