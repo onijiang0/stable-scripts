@@ -8,7 +8,7 @@
 * `ql/`：微信小程序类定时任务脚本（签到、积分、活动，Python / JS 混排）
 * `tools/`：青龙推送与 JS 运行时工具（`env.js` / `sendNotify.js`），**上传到青龙 `scripts/tools/`**
 * `sillygirl/`：傻妞机器人插件（直接放入傻妞插件目录使用）
-* `archive/`：**已停用的历史脚本归档**，不参与运行。归档规则见 [`archive/README.md`](./archive/README.md)
+* `archive/`：**已停用的历史脚本归档**，不参与运行（**仅本地保留，不入本仓库**）
 
 > ⚠️ **本仓库的目录名和青龙面板里的目录名不一样**，上传时别放错位置：
 
@@ -66,8 +66,7 @@
 
 > 10086 签到原先有三份并行实现（`cmcc_sign.js` / `cmcc_sign.py` / `cmcc_sign_oauth.js`），
 > 变量名同为 `cmcc`，同账号重复启用会互相干扰。已于 2026-09-19 统一为 `cmcc_sign.py`，
-> 另两份移入 [`archive/2026-09-19-cmcc-duplicates/`](./archive/2026-09-19-cmcc-duplicates/)，
-> 恢复方法见该目录下的 `NOTE.md`。
+> 另两份移入本地归档区 `archive/2026-09-19-cmcc-duplicates/`（不入本仓库，恢复方法见该目录 `NOTE.md`）。
 
 ### sillygirl/ 插件一览
 | 文件 | 功能 | 触发命令 | cron |
@@ -89,15 +88,17 @@
 > `tools/` 必须与 `wxapp/` 同级上传到青龙，否则 JS 脚本找不到 `env.js`/`sendNotify.js`。
 
 ## 🗄️ 归档过期脚本
-脚本被取代或对应活动下线后，**不要直接删除**，按下面四步归档到 `archive/`：
+脚本被取代或对应活动下线后，**不要直接删除**，按下面四步归档到（本地的）`archive/`：
 
 1. 用 `git mv` 移入 `archive/YYYY-MM-DD-主题/`（用 `git mv` 而非删除重建，保留文件历史）。
 2. 在该目录写 `NOTE.md`，写清：归档日期 / 归档原因 / 被谁取代 / 恢复方法。
 3. **同步停用青龙面板或傻妞里对应的定时任务** —— 归档只是移走文件，
    cron 不会自动消失，不处理会持续报错。
-4. 在 [`archive/README.md`](./archive/README.md) 的索引表登记一行。
+4. 在 `archive/README.md` 的索引表登记一行（该文件同样仅本地保留）。
 
-完整规则与恢复命令见 [`archive/README.md`](./archive/README.md)。
+> ⚠️ `archive/` **不入本仓库**（`.gitignore` 已排除）。归档的作用是**降低本地找回成本**：
+> 打开目录就看得见，不必记得住 commit sha 再 `git show`。
+> 因此归档目录请自行做好本地备份，它不在 git 历史里。
 
 ## 🛡️ 安全与配置
 本仓库**严禁**提交任何私人 Token、Cookie、API Key、密码或服务器真实 IP。
