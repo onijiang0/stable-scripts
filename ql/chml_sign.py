@@ -36,6 +36,18 @@
 # 2. aggrId=661 为平台活动参数，已写入脚本
 # 3. 登录接口为推断，失败时用 chmlck 或抓包核对
 # 4. chmlck/手机号等账号信息不进 Git；日志脱敏
+# 5. ★「网络不可达」的真相可能是 **DNS 解析失败**，不是网络不通、更不是 token 问题！
+#    2026-09-23 面板侧实测：
+#      DNS 解析 hongke.changhong.com → 连续 4 次 gaierror [Errno -3] Try again（每次卡满 5s）
+#      TCP 直连该域名解析出的 IP:443  → OK 0.03s
+#      IP+SNI 直接发 HTTPS            → HTTP 400 {"code":401,...,"必填参数token不存在!"}（0.12s）
+#      baidu.com 对照                 → 200 0.13s
+#    → 面板所在网络的解析器（容器 /etc/resolv.conf 继承宿主）解析该域名失败，
+#      服务本身完全正常。requests 的报错文案会写成「网络不可达」，极具误导性。
+#    本脚本已支持 CHML_HOST_IP 兜底：解析失败时把域名钉到指定 IP 直连（仍发原 Host/SNI）。
+#
+# 变量补充：
+#   CHML_HOST_IP  选填，hongke.changhong.com 的 IP，DNS 挂掉时兜底直连
 # ------------------------------------------
 # */
 
@@ -44,6 +56,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sys
 import time
 from datetime import datetime
@@ -119,10 +132,52 @@ def direct_session() -> requests.Session:
     return s
 
 
+# ---------------- DNS 兜底（应对面板解析器故障） ----------------
+
+HOST_IP_OVERRIDE = os.getenv("CHML_HOST_IP", "").strip()
+_dns_state: Dict[str, Any] = {"checked": False, "resolvable": True, "used_fallback": False}
+
+
+def _resolve_target() -> Tuple[str, bool]:
+    """返回 (要连接的主机, 是否走了 IP 兜底)。
+
+    面板实测过 DNS 解析该域名持续失败（gaierror Errno -3），而服务本身正常。
+    配置 CHML_HOST_IP 后，解析失败即把请求钉到该 IP，避免整轮白跑。
+    """
+    if not HOST_IP_OVERRIDE:
+        return BASE_URL, False
+    if not _dns_state["checked"]:
+        _dns_state["checked"] = True
+        try:
+            socket.getaddrinfo("hongke.changhong.com", 443, proto=socket.IPPROTO_TCP)
+            _dns_state["resolvable"] = True
+        except Exception as e:
+            _dns_state["resolvable"] = False
+            say(f"⚠️ DNS 解析 hongke.changhong.com 失败（{type(e).__name__}），改用 IP 兜底")
+    if _dns_state["resolvable"]:
+        return BASE_URL, False
+    _dns_state["used_fallback"] = True
+    return BASE_URL.replace("hongke.changhong.com", HOST_IP_OVERRIDE), True
+
+
+def _request(method: str, url: str, **kwargs) -> requests.Response:
+    """带 IP 兜底的请求。
+
+    走 IP 时仍带 Host 头（verify 已关闭，故不涉及证书域名校验），
+    对服务端而言与走域名等价。
+    """
+    target, pinned = _resolve_target()
+    if pinned:
+        headers = kwargs.setdefault("headers", {})
+        headers.setdefault("Host", "hongke.changhong.com")
+        return direct_session().request(method, url.replace(BASE_URL, target), **kwargs)
+    return direct_session().request(method, url, **kwargs)
+
+
 def http(method: str, url: str, **kwargs) -> requests.Response:
     kwargs.setdefault("timeout", REQUEST_TIMEOUT)
     kwargs.setdefault("verify", False)
-    return direct_session().request(method, url, **kwargs)
+    return _request(method, url, **kwargs)
 
 
 def common_headers(token: str = "") -> Dict[str, str]:
@@ -271,11 +326,25 @@ def api_post(url: str, token: str, payload: Optional[Dict[str, Any]] = None) -> 
     except Exception as e:
         msg = clean_line(e) or str(e)
         kind = "网络不可达"
-        if re.search(r"SSLError|ssl|certificate", msg, re.I):
+        # 解析失败必须单独标出来：它常被 requests 笼统写成 ConnectionError，
+        # 让人误以为「服务挂了」，实际只是 DNS 不通。
+        # 实测 requests 的真实文案（urllib3 v2）：
+        #   NameResolutionError("... Failed to resolve 'host' ([Errno -3] Try again)")
+        if re.search(
+            r"NameResolutionError|Failed to resolve|name resolution|"
+            r"Name or service not known|nodename|gaierror|-?3\] Try again",
+            msg,
+            re.I,
+        ):
+            kind = "DNS解析失败"
+        elif re.search(r"SSLError|ssl|certificate", msg, re.I):
             kind = "HTTPS/证书异常"
         elif re.search(r"timed out|timeout", msg, re.I):
             kind = "请求超时"
-        return {"status_code": -1, "message": f"{kind}: {msg[:80]}"}
+        elif re.search(r"Connection refused|拒绝", msg, re.I):
+            kind = "连接被拒"
+        hint = "" if HOST_IP_OVERRIDE else "（可设 CHML_HOST_IP 兜底）"
+        return {"status_code": -1, "message": f"{kind}: {msg[:80]}{hint}"}
 
 
 def is_success(resp: Dict[str, Any]) -> bool:
