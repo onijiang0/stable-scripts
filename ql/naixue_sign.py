@@ -23,27 +23,35 @@
 # 4. send_notify 统一简报；openid/accessToken 脱敏；业务结果写清奈雪币
 #
 # 契约（小程序 appid wxab7430e6e8b9a4ab，host tm-api.pin-dao.cn）：
-# 来源    抓包（Reqable）+ 小程序包反编译还原，平台参数见下方默认值
+# 来源    反编译 app-service.js（module common.js / module 11 wrapper）+ 实测验证
 # code    POST {wx_server_url}/wx/code auth:{wx_auth} json:{openid,appid}
-# 登录    POST https://tm-api.pin-dao.cn/passport/authenticate/wxapp/verify/grc
-#         body {type:3, wxappCode:<code>}
-#         -> data.accessToken / data.openId / data.unionId / data.firstLogin
+# 登录    POST /passport/authenticate/wxapp/verify/grc
+#         ⚠️ 所有接口（含登录）都必须走统一 envelope {common:签名, params:业务}
+#         裸 body {type,wxappCode} 会被拒：400 {"error_msg":"invalid request body, no common"}
+#         params {brand,tenantId,appId, type:3, wxappCode:<code>}
+#         -> {code:0, success:true, data:{accessToken, openId, unionId, firstLogin}}
 # 会话    header Authorization: Bearer {accessToken}
-# 请求体  {common:{...签名}, params:{...业务参数}}  统一 envelope
+# 请求体  {common:{...签名}, params:{brand,tenantId,appId,...业务参数}}  统一 envelope
 # 签到查询 POST /user/sign/condition  params {signDate}
+#         -> data.status      true=今日已签 / false=未签（★判定键是 status）
+#            data.signCount   连续签到天数
+#            data.signCoins   连签奖励表 [{date,coin}]
 # 签到     POST /user/sign/save       params {signDate}
+#         -> data.flag=true  本次签到成功 / flag=false 今日已签过（幂等，仍 code=0）
 # 签到记录 POST /user/sign/records    params {signDate, startDate}
-# 用户     POST /user/base-userinfo
-# 奈雪币   POST /user/coin/info
-# 判定     code==0 为成功（sign/save 成功仅返回 code=0）
+# 用户     POST /user/base-userinfo   -> data.nickName / phone
+# 奈雪币   POST /user/coin/info       -> data.coin
+# 判定     code==0 为成功（响应统一 {code,message,data,dataType,success}）
 # signDate 格式 Y-m-d，月/日【不补零】（例 2026-9-21），与 H5 源码一致
-# 签名     common 必带 openId / timestamp / nonce / signature
+# 签名     common 必带 openId / timestamp / nonce / signature（另可带 platform/version，
+#          服务端实测不校验签名强度，带与不带都能过；保留 platform/version 以贴合真机）
 #          msg  = encodeURI("nonce={nonce}&openId={openId}&timestamp={timestamp}")
 #          sign = base64(HmacSHA1(msg, KEY))
-#          KEY 默认 iYkcDMF8Eti255hti5M629RQTQ4Z2XihG
-#          当 brand∈{26000252,26000254} 且 common.platform=="wxapp"
-#          且 common.version>=4.2 时改用 sArMTldQ9tqU19XIRDMWz7BO5WaeBnrezA
-#          （本脚本不带 version，走默认 KEY）
+#          KEY：小程序走 brand 档 sArMTldQ9tqU19XIRDMWz7BO5WaeBnrezA
+#          （条件 brand∈{26000252,26000254} 且 platform=="wxapp" 且 version>=4.2）
+#          另有无 version 的默认档 iYkcDMF8Eti255hti5M629RQTQ4Z2XihG
+#          ⚠️ 实测：登录接口对签名 key 不敏感（两档都返回同一业务码），
+#             故 key 不是历史失败的原因；真正的坑是缺 common（见踩坑 6）
 #
 # 平台业务参数（包内/抓包回填，非账号密钥）：
 #   appid=wxab7430e6e8b9a4ab   brand=26000252   tenantId=1
@@ -56,6 +64,11 @@
 # 3. 登录 type 固定为 3；wxappCode 是 wx.login 的 code（取码服务给的就是它）
 # 4. 平台业务参数写脚本默认值；账号 openid/wx_server_url/wx_auth 只进环境变量
 # 5. 日志脱敏 openid/accessToken
+# 6. ★登录必须带 envelope。旧版裸 body 会返回 400 {"error_msg":"invalid request body, no common"}，
+#    而该响应**没有 code 字段**，旧日志只打 `code=None msg=无`，看不出真因。
+#    排查这类"code=None"时要用 err_msg() 兜底读 error_msg / error，别只看 code。
+# 7. ★签到状态键是 data.status（true=已签），不是 signFlag/signed/hasSign 之流；
+#    sign/save 用 data.flag 表示"本次是否真的签上了"（false=今日已签过，属幂等成功）。
 # ------------------------------------------
 # */
 
@@ -115,6 +128,7 @@ COIN_INFO_URL = f"{HOST}/user/coin/info"
 REQUEST_TIMEOUT = 30
 
 LOGIN_TYPE = 3
+WXAPP_VERSION = 6.0  # 包内 module 16 的 version（反编译原文 "6.0.82"）；>=4.2 走 brand 档密钥
 H5_SIGN_OPENID = "QL6ZOftGzbziPlZwfiXM"
 SIGN_KEY_DEFAULT = "iYkcDMF8Eti255hti5M629RQTQ4Z2XihG"
 SIGN_KEY_BRAND = "sArMTldQ9tqU19XIRDMWz7BO5WaeBnrezA"
@@ -181,11 +195,20 @@ def build_sign_common() -> Dict[str, Any]:
     nonce = random.randint(0, 999999)
     raw = f"nonce={nonce}&openId={H5_SIGN_OPENID}&timestamp={ts}"
     msg = urllib.parse.quote(raw, safe="=&")
-    key = SIGN_KEY_DEFAULT
+    # 小程序真机带 platform=wxapp + version>=4.2，命中 brand 档密钥；
+    # 实测服务端对本接口签名强度不敏感（两档 key 同结果），此处按真机口径对齐。
+    key = SIGN_KEY_BRAND if (BRAND in (26000252, 26000254) and WXAPP_VERSION >= 4.2) else SIGN_KEY_DEFAULT
     sig = base64.b64encode(
         hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha1).digest()
     ).decode("utf-8")
-    return {"openId": H5_SIGN_OPENID, "timestamp": ts, "nonce": nonce, "signature": sig}
+    return {
+        "openId": H5_SIGN_OPENID,
+        "timestamp": ts,
+        "nonce": nonce,
+        "signature": sig,
+        "platform": "wxapp",
+        "version": WXAPP_VERSION,
+    }
 
 
 def envelope(biz_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -226,9 +249,11 @@ def api_post(url: str, payload: Dict[str, Any], token: str = "") -> Dict[str, An
 
 
 def err_msg(data: Any) -> str:
+    """提取错误文案。注意：网关/框架级错误用 error_msg（如 missing common），
+    业务级错误用 message；两者都要认，否则日志会只剩 code=None 看不出真因。"""
     if not isinstance(data, dict):
         return clean_line(data) or "-"
-    for k in ("message", "msg", "errorMsg", "error"):
+    for k in ("message", "msg", "error_msg", "errorMsg", "error", "detail"):
         if data.get(k):
             return str(data.get(k))
     return ""
@@ -262,7 +287,8 @@ def login_by_code(openid: str) -> Tuple[Optional[str], Dict[str, Any]]:
     print("🔐 使用 code 登录")
     code = get_wx_code(openid)
     print(f"ℹ️ 取码结果 code={'有' if code else '无'}")
-    payload = {"type": LOGIN_TYPE, "wxappCode": code}
+    # ⚠️ 登录同样必须走 envelope：裸 body 会被拒 400 {"error_msg":"...no common"}
+    payload = envelope({"type": LOGIN_TYPE, "wxappCode": code})
     data = api_post(LOGIN_URL, payload, token="")
     bag = data.get("data") if isinstance(data.get("data"), dict) else {}
     token = str(bag.get("accessToken") or "").strip()
@@ -307,17 +333,31 @@ def query_sign_condition(token: str, sign_date: str) -> Dict[str, Any]:
 
 
 def do_sign(token: str, sign_date: str) -> Tuple[bool, str, str]:
-    """返回 (是否成功, 简报文案, 奖励描述)。"""
+    """返回 (是否成功, 简报文案, 奖励描述)。
+
+    实测契约（2026-09-23）：
+    - condition.data.status  true=今日已签 / false=未签（★判定键）
+    - condition.data.signCount 连续签到天数
+    - save.data.flag         true=本次签到生效 / false=今日已签过（幂等，code 仍为 0）
+    """
     cond = query_sign_condition(token, sign_date)
     if isinstance(cond, dict):
-        for k in ("signFlag", "signed", "hasSign", "isSign", "todaySign"):
-            if cond.get(k) in (True, 1, "1", "true"):
-                return True, "今日已签到 ✅", "已签到"
+        # status 是实际键；其余为兼容旧版/兜底
+        for k in ("status", "signFlag", "signed", "hasSign", "isSign", "todaySign"):
+            v = cond.get(k)
+            if v is True or v in (1, "1", "true"):
+                days = cond.get("signCount")
+                tail = f"（连签 {days} 天）" if days else ""
+                return True, f"今日已签到 ✅{tail}", "已签到"
     data = api_post(SIGN_SAVE_URL, envelope({"signDate": sign_date}), token)
     if not is_ok(data):
         msg = err_msg(data) or str(data.get("code"))
         return False, f"{msg[:40]} ❌", ""
     bag = data.get("data") if isinstance(data.get("data"), dict) else {}
+    # flag=false 表示服务端判定今日已签过，属幂等成功，不能报失败
+    flag = bag.get("flag")
+    if flag is False or flag in (0, "0", "false"):
+        return True, "今日已签到 ✅（重复提交，幂等）", "已签到"
     reward = ""
     for k in ("coinNum", "coin", "point", "score", "growValue", "rewardNum"):
         if bag.get(k) is not None:
