@@ -38,7 +38,9 @@
 |---|---|---|---|
 | `oppo_sign.js` | OPPO 小程序 · 会员查询 / 积分签到 / 做任务赚积分 | `oppo` | `21 8 * * *` |
 | `asdcb_sign.py` | 阿水大杯茶 · 每日签到 / 会员日券 / 积分统计 | `asdcb` | `23 11 * * *` |
+| `ems_sign.js` | 中国邮政 EMS · 会员每日签到（joinSign） | `ems` | `35 11 * * *` |
 | `yht_sign.py` | 益禾堂 · 企迈 code 登录 + 兑吧动态 token 签到 | `yht` | `17 13 * * *` |
+| `sto_sign.js` | 申通快递 · 会员每日积分签到 | `sto` | `38 13 * * *` |
 | `erke_sign.py` | 鸿星尔克会员签到 | `hxek` | `5 14 * * *` |
 | `iqoo_sign.py` | iQOO 社区 · 签到/浏览/点赞/分享/评论/发帖/抽奖/积分 | `iqoo` | `10 14 * * *` |
 | `tebu_sign.py` | 特步会员中心 · 微盟 OneCRM 签到 / 积分 | `tebu` | `16 14 * * *` |
@@ -48,7 +50,6 @@
 | `xxy_sign.py` | 芯享会（心相印）· code 登录 + 每日签到 | `xxy` | `35 14 * * *` |
 | `xboxjlb_sign.py` | Xbox 俱乐部 · 有赞小程序签到 | `xboxjlb` | `40 14 * * *` |
 | `naixue_sign.py` | 奈雪的茶 · 会员每日签到（奈雪币 / 成长值） | `naixue` | `48 14 * * *` |
-| `yzf_sign.py` | 翼支付（电信 bestpay）· 签到专区 | `yzf` | `22 15 * * *` |
 | `qch_sign.py` | 七彩虹商城 · 每日签到 / 积分 | `qch` | `36 15 * * *` |
 | `hsay_sign.py` | 沪上阿姨 · 企迈 code 登录 + 签到 / 积分 | `hsay` | `41 15 * * *` |
 | `hyjk_sign.py` | 荷叶健康 · 果园打卡 / 浇水 / 任务 / 签到抽奖 | `hyjk` | `27 16 * * *` |
@@ -59,7 +60,9 @@
 | 文件 | 作用 |
 |---|---|
 | `send_notify.py` | Python 侧推送封装，内部调用 `tools/sendNotify.js` |
-| `yzf_mgs_client.js` | 翼支付 MGS 客户端，供 `yzf_sign.py` 调用 |
+
+> **翼支付（yzf）链路已失效**（`yzf_sign.py` → `yzf_mgs_client.js` → `yzf_js/`），
+> 实测无法运行，相关文件仅保留在本地、不入本仓库。
 
 > 10086 签到原先有三份并行实现（`cmcc_sign.js` / `cmcc_sign.py` / `cmcc_sign_oauth.js`），
 > 变量名同为 `cmcc`，同账号重复启用会互相干扰。已于 2026-09-19 统一为 `cmcc_sign.py`，
