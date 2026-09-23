@@ -47,6 +47,11 @@ code     POST {wx_server_url}/wx/code        json:{openid,appid}
 4. takeClockIn（打卡）与 joinSign（会员签到）是两套业务，
    前者只在 config 里有定义、无调用点（逻辑在分包，无法还原）
 5. openid 必须是取码服务账号表里已保存的账号，用业务 openid 会报取包/登录失败
+6. 取码失败是**瞬态**的，不是脚本 bug：实测同账号隔几分钟再取就成功。
+   服务端失败响应带 data.error（如 js-login code empty）已带进日志，便于区分：
+   - js-login code empty → 取码账号侧 wx.login 没拿到 code（账号抖动/限流），可重试
+   - 无 error 字段而 message 异常 → 检查 wx_server_url / wx_auth
+   已内置重试（默认 3 次，递增退避），可用 EMS_CODE_RETRY 调整
 ------------------------------------------
 */
 
@@ -205,18 +210,45 @@ class EmsTask {
         $.log(line);
     }
 
-    /** smallcat 取 wx.login code */
-    async fetchWxCode() {
+    /** 单次取码；失败时把服务端 error 明细一并抛出，便于定位（区分限流/掉登录态/代理故障） */
+    async fetchWxCodeOnce() {
         const res = await axios.post(
             `${WX_SERVER_URL}/wx/code`,
             { openid: this.openid, appid: APP.appid },
             { headers: { auth: WX_AUTH, "content-type": "application/json" }, timeout: TIMEOUT }
         );
         const j = res.data || {};
-        if (!j.status) throw new Error(`取码失败: ${j.message || ""}`);
+        if (!j.status) {
+            // 取码服务失败响应形如 {status:false, message:"获取失败", data:{error:"js-login code empty"}}
+            // data.error 是真正的失败原因，必须带出来，否则只剩笼统的「获取失败」
+            const detail = j.data && j.data.error ? ` (${j.data.error})` : "";
+            const err = new Error(`取码失败: ${j.message || ""}${detail}`);
+            err.retryable = true; // 取码失败多为瞬态（限流/取码账号抖动），值得重试
+            throw err;
+        }
         const code = (j.data && (j.data.code || j.data)) || null;
         if (!code) throw new Error("取码响应缺少 code");
         return code;
+    }
+
+    /** smallcat 取 wx.login code：瞬态失败自动重试，避免单次抖动判死 */
+    async fetchWxCode() {
+        const maxRetry = Number(process.env.EMS_CODE_RETRY || 3);
+        let lastErr;
+        for (let attempt = 1; attempt <= maxRetry; attempt++) {
+            try {
+                return await this.fetchWxCodeOnce();
+            } catch (e) {
+                lastErr = e;
+                const fatal = e.retryable === false || /缺少 code/.test(e.message || "");
+                if (fatal || attempt >= maxRetry) throw e;
+                // 取码服务约 8 次/90s 限流；退避递增，避免重试本身触发限流
+                const wait = 3000 * attempt;
+                this.log(`取码第 ${attempt}/${maxRetry} 次失败：${e.message}，${wait / 1000}s 后重试`);
+                await $.wait(wait, wait + 1000);
+            }
+        }
+        throw lastErr;
     }
 
     async getWXData(code) {
