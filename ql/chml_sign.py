@@ -16,7 +16,6 @@
 # wx_auth        必填，取码服务鉴权
 # chml_aggr_id   选填，活动 id；留空则自动从「我的活动」发现当前进行中的签到活动
 # chmlck         选填，抓包 token（&/换行分隔）；填了则跳过 code 登录
-# CHML_HOST_IP   选填，hongke.changhong.com 的 IP，DNS 挂掉时兜底直连
 # QL_NOTIFY      选填，0 关闭推送
 # ------------------------------------------
 # 契约（appid wx36c3413e8fe39263，hongke.changhong.com/gw）★ 2026-09-23 实测：
@@ -51,8 +50,20 @@
 #    gateway.mymlsoft.com/gateway/mluser 只是 request.js 里不会命中的兜底分支，
 #    打过去全 500，极易误判成「服务已下线」。
 # 3. chmlck / openid 等账号信息不进 Git；日志脱敏。
-# 4. 「网络不可达」的真相可能是 DNS 解析失败（面板侧实测 gaierror [Errno -3]），
-#    服务本身正常；本脚本支持 CHML_HOST_IP 兜底。
+# 4. ★★「网络不可达」的真相是**容器里的 IPv6 残废**，不是域名解析不了、也不是服务挂了。
+#    面板容器是 musl（Alpine），musl 的 getaddrinfo 在未限定 family 时会**同时查
+#    A 和 AAAA**；该网络没有 IPv6 出口，AAAA 查询必然卡满超时 → [Errno -3] Try again，
+#    requests 整体失败并包装成「网络不可达」（极具误导性）。
+#    实测（面板容器内，同一时刻同域名）：
+#        getaddrinfo(host, port)               → FAIL 5.01s [Errno -3]
+#        getaddrinfo(host, port, AF_INET, ...) → OK   0.004s ×10/10  → 119.3.183.149
+#        getaddrinfo(host, port, AF_INET6,...) → FAIL 5.01s [Errno -3]   ← 真凶
+#        requests 原始           → FAIL 5.01s
+#        requests + 强制 IPv4    → OK   HTTP 400 0.15s
+#        curl（happy-eyeballs）  → 400 但 2.13s（先等 AAAA 才回退）；curl -4 → 0.12s
+#    本脚本把 socket.getaddrinfo 包一层强制 AF_INET 根治，**不硬编码 IP**，
+#    厂商换 IP 也自动跟随（旧的 CHML_HOST_IP 硬编码兜底已废弃）。
+#    辨识特征：失败耗时**稳定≈5s**（DNS 超时）而非 30s（连接超时）。
 # ------------------------------------------
 # */
 
@@ -101,6 +112,31 @@ HOST = "hongke.changhong.com"
 BASE_URL = f"https://{HOST}/gw"
 REQUEST_TIMEOUT = 30
 
+# ── 强制 IPv4 解析 ──────────────────────────────────────────────
+# 面板容器是 musl（Alpine），且容器内**没有 IPv6 出口**。
+# musl 的 getaddrinfo 在未限定 family 时会**同时查 A 和 AAAA**，
+# 而 AAAA 查询在这个网络里必然卡满超时 → [Errno -3] Try again，
+# requests/urllib 因此整体失败，被包装成「网络不可达」。
+# 实测（2026-09-23 面板容器内，同一时刻）：
+#   getaddrinfo(host, port)                → FAIL 5.01s [Errno -3]
+#   getaddrinfo(host, port, AF_INET, ...)  → OK   0.004s ×10/10
+#   getaddrinfo(host, port, AF_INET6, ...) → FAIL 5.01s [Errno -3]  ← 真凶
+#   requests 原始            → FAIL 5.01s
+#   requests + 强制 IPv4     → OK   HTTP 400 0.15s
+#   curl（happy-eyeballs）   → 400 但 2.13s（先等 AAAA 才回退）
+#   curl -4                  → 400 0.12s
+# 故把 socket.getaddrinfo 包一层强制 AF_INET。**不需要硬编码 IP**，
+# 域名换 IP 也自动跟随；比 XXX_HOST_IP 兜底更干净、更根本。
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+
+socket.getaddrinfo = _getaddrinfo_ipv4
+# ────────────────────────────────────────────────────────────────
+
 UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50 NetType/WIFI Language/zh_CN"
@@ -108,11 +144,6 @@ UA = (
 
 # 活动 id：优先取环境变量，否则自动发现
 FIXED_AGGR_ID = os.getenv("chml_aggr_id", "").strip()
-HOST_IP_OVERRIDE = os.getenv("CHML_HOST_IP", "").strip()
-
-_dns_state: Dict[str, Any] = {
-    "checked": False, "resolvable": True, "used_fallback": False,
-}
 
 
 def say(msg: str) -> None:
@@ -139,35 +170,9 @@ def get_env(*names: str) -> str:
     return ""
 
 
-def _resolve_target() -> Tuple[str, bool]:
-    """DNS 挂掉时把域名钉到 HOST_IP_OVERRIDE 直连（仍发原 Host）。"""
-    if not HOST_IP_OVERRIDE:
-        return BASE_URL, False
-    if not _dns_state["checked"]:
-        _dns_state["checked"] = True
-        try:
-            socket.getaddrinfo(HOST, 443, proto=socket.IPPROTO_TCP)
-            _dns_state["resolvable"] = True
-        except Exception as e:
-            _dns_state["resolvable"] = False
-            say(f"⚠️ DNS 解析 {HOST} 失败（{type(e).__name__}），改用 IP 兜底")
-    if _dns_state["resolvable"]:
-        return BASE_URL, False
-    _dns_state["used_fallback"] = True
-    return BASE_URL.replace(HOST, HOST_IP_OVERRIDE), True
-
-
-_DNS_ERR = re.compile(
-    r"NameResolutionError|Failed to resolve|name resolution|"
-    r"Name or service not known|nodename|gaierror|-?3\] Try again",
-    re.I,
-)
-
-
 def api(method: str, path: str, *, body: Any = None,
         headers: Optional[Dict[str, str]] = None) -> Tuple[bool, Any, str]:
-    base, used_ip = _resolve_target()
-    url = base + path
+    url = BASE_URL + path
     hdrs = {
         "content-type": "application/json",
         "Accept-Language": "zh-CN,zh;q=0.9",
@@ -190,11 +195,6 @@ def api(method: str, path: str, *, body: Any = None,
                 return False, None, f"非 JSON 响应 HTTP {r.status_code}: {r.text[:200]}"
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
-            if _DNS_ERR.search(last_err) and HOST_IP_OVERRIDE and not used_ip:
-                # 首次 DNS 失败时立即切 IP 再试
-                _dns_state["resolvable"] = False
-                base, _ = _resolve_target()
-                url = base + path
             if attempt < 2:
                 time.sleep(1.5 * (attempt + 1))
     return False, None, last_err
