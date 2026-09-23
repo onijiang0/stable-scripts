@@ -32,8 +32,15 @@
 # 积分      POST /integral_record.json   form: currentPage & pageSize & 会员字段 & sign
 #           -> response.accumulatPoints
 #
-# 登录态缓存 6 小时；失败自动强刷 jcode 重登一次。
+# 登录态缓存 24 小时（缓存文件 erke_login_cache.json，可用 env erke_cache 覆盖路径）；
+# 命中条件：距写入 _ts 不足 24h 且 memberId 有效。
+# 缓存失效/memberId 无效时，本轮只重新调一次 /wx/code 再登录，不做 force 重试。
 # 无需手填 ERKE_CONF（member_id#enterprise_id#...）。
+# ------------------------------------------
+# 踩坑：
+# - 青龙的 log_path 是「目录/文件名」拼起来的，读日志要拆开传 path 参数。
+# - cron 对象的 status 是 0=空闲/1=运行中，与 env 的 status（0=启用/1=禁用）不同义，别混。
+# - 线上脚本可能与本地不同步；改完记得 PUT /open/scripts 重新部署。
 # ------------------------------------------
 # */
 

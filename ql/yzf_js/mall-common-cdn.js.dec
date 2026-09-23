@@ -1,0 +1,72 @@
+// 生产CDN文件，谨慎操作
+
+// 新交互的白名单
+window.newInteractiveWhiteList = [
+  "happy_go", // 中国电信
+  "winglet_go", // 小翼管家
+  "yishang_go", // 翼商超市
+  "ahzw_go", // 安徽掌万
+  "tysh_go", // 江苏天翼生活
+  "ykd_go", // 上海云宽带
+  "alipayclient_go", // 支付宝
+  "mopan_go", // 四川魔盘
+  "izunyi_go", // 爱遵义
+  "t3webview_go", // T3APP
+  "umetrip_go", // 航旅纵横
+  "superapp_go", // 上海云宽带
+];
+
+// 融合app的ua以及对应的环境
+window.fusionAppUA = {
+  ctclient: "happy_go", // 中国电信
+  ctapp: "winglet_go", // 小翼管家
+  telwelfare_app: "yishang_go", // 翼商超市
+  ahzw: "ahzw_go", // 安徽掌万
+  tysh: "tysh_go", // 江苏天翼生活
+  // ykd: "ykd_go", // 上海云宽带
+  alipayclient: "alipayclient_go", // 支付宝
+  mopan: "mopan_go", // 四川魔盘
+  izunyi: "izunyi_go", // 爱遵义
+  t3webview: "t3webview_go", // T3APP
+  umetrip: "umetrip_go", // 航旅纵横
+  superapp: "superapp_go", // 上海云宽带
+};
+
+// 新交互是否需要一键登录
+window.newInteractiveNeedOneLogin = true;
+
+// 其他小程序投放(福利)H5时的连登bmtid标识
+window.otherWechartminiBmtidList = [
+  "NJDXYGFWT",
+  "JHDX",
+  "FJDX",
+  "HNYCT",
+  "CQ_ZGDX5GHY",
+  "HBST_MINIPROGRAM",
+  "YXFZHST_MINIPROGRAM",
+  "FJYCY",
+  "XFZHST_MINIPROGRAM",
+  "GSST_XCX", // 甘肃食堂
+  "MAICANBAO_MIN", // 菏泽脉餐宝小程序
+  "YQZHCT_MIN", // 新疆食堂
+];
+
+// h5Transfer h5中转页授权联登域名白名单配置
+// 域名后面注释：业务场景 + 提出人
+window.h5UserAuthList = [
+  "https://cdn.bestpay.cn", // 测试域名 - XXX
+  "https://super.sh.189.cn", // 上海电信 - 李雪垠
+  "https://pay.sc.189.cn", // 四川分省 - 李雪垠
+];
+
+// 福利积分专用
+window.pointsSortFlag = false;
+
+// 福利融合渠道
+window.otherFuLiBmtidList = [
+  "XCSC_PROGRAM", // 鑫采商城小程序
+  "NGEJ_APP", // 南钢e家app
+  "xcsc_program", // 鑫采商城小程序
+  "ngej_app", // 南钢e家app
+  'FLPT', 'FYG_H5', 'FJYCY', 'XCSC_PROGRAM', 'NGEJ_APP'
+]

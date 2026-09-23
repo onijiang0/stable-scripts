@@ -1,0 +1,60 @@
+window.bestpayMemberCdnCofig = {
+  storeVip: {
+    storeCouponPage: 'https://h5.bestpay.cn/subapps/activity-h5/external-coupon/pickUp/index.html#/pages/user/index?hybridVersion=3.0&channel=xxzt&businessId=890811000418444470010007&pageId=1000491'
+  },
+  memberConfig: {
+    签到会员入口未入会: 'https://cdn.bestpay.cn/market/签到页面会员入口未入会.png',
+    签到会员入口已入会: 'https://cdn.bestpay.cn/market/签到页面会员入口已入会.png',
+    会员通栏背景: 'https://ctcdn.bestpay.cn/group4/M00/C7/35/rBwwImghn0aAcW5NAAynHwZ8_mw705.png',
+    会员首页背景颜色: '#FFF5DC',
+    入会按钮价格文案颜色: '#FFF5DC',
+    入会按钮确认勾选颜色: '#823C14',
+    会员卡片节省金额颜色: '#fd4e1d',
+    会员权益模块背景头图: 'https://ctcdn.bestpay.cn/group4/M00/C7/3A/rBwwImghty6AUBk4AAAF39qNEn4155.png',
+    会员权益立即领取按钮背景图: 'https://ctcdn.bestpay.cn/group4/M00/D1/7A/rBwwImiAgYuAPqauAAADuCXse04809.png',
+    会员权益立即领取按钮颜色: '#ffffff',
+    会员权益立即使用按钮背景图: 'https://ctcdn.bestpay.cn/group4/M00/D1/7A/rBwwImiAghmAYsivAAAFwdUMVpI611.png',
+    会员权益立即使用按钮颜色: '#A6653E',
+    会员入会弹窗背景图: 'https://cdn.bestpay.cn/market/%E5%85%A5%E4%BC%9A%E5%BC%B9%E7%AA%97%E8%83%8C%E6%99%AF.png',
+    会员入会弹窗关闭按钮: 'https://ctcdn.bestpay.cn/group4/M00/C7/45/rBwwImgiq5uAOgmkAAAF0ixbHaA082.png',
+    会员入会按钮背景图: 'https://ctcdn.bestpay.cn/group4/M00/C7/46/rBwwImgirOyAQLsBAAC4zXChOzU285.png',
+    会员入会按钮光标图: 'https://ctcdn.bestpay.cn/group4/M00/C7/47/rBwwImgisRaAbxBFAAAoPrsdCHM486.png',
+    未开通文案: '每月最高省',
+    生日礼包按钮: 'https://ctcdn.bestpay.cn/group4/M00/D1/7A/rBwwImiAgiaAFkvxAAALXomk8nY598.png',
+    会员字体主颜色: '#8d4e28',
+    会员权益券金额颜色: '#fd4e1d',
+    会员权益券可领数量颜色: '#8d4e28',
+    外部券码样式: {
+      会员外部券码弹窗背景图: 'https://cdn.bestpay.cn/market/外部券码领取成功会员.png',
+      会员外部券码按钮背景颜色: '#a6653e'
+    }
+  },
+  storeMemberConfig: {
+    签到会员入口未入会: 'https://cdn.bestpay.cn/market/签到页面会员入口未入会.png',
+    签到会员入口已入会: 'https://cdn.bestpay.cn/market/签到页面会员入口已入会.png',
+    会员通栏背景: 'https://ctcdn.bestpay.cn/group4/M00/D1/75/rBwwImiAUciABtxHAARjUpo0UGw652.png',
+    会员首页背景颜色: '#9FECFF',
+    入会按钮价格文案颜色: '#FFFFFF',
+    入会按钮确认勾选颜色: '#051826',
+    会员卡片节省金额颜色: '#fff1A1',
+    会员权益模块背景头图: 'https://ctcdn.bestpay.cn/group4/M00/D1/75/rBwwImiAUhCATTP7AAAFwM5Es5A652.png',
+    会员权益立即领取按钮背景图: 'https://ctcdn.bestpay.cn/group4/M00/D1/79/rBwwImiAeTyADEBoAAAXx-C45BI775.png',
+    会员权益立即领取按钮颜色: '#8E3E01',
+    会员权益立即使用按钮背景图: 'https://ctcdn.bestpay.cn/group4/M00/D1/79/rBwwImiAeaiAAW8qAAAC_TffGuU819.png',
+    会员权益立即使用按钮颜色: '#FF4B84',
+    会员入会弹窗背景图: 'https://ctcdn.bestpay.cn/group4/M00/E5/8E/rBwwImkup4OAG7WdAAuNphlMGNs030.png',
+    会员入会弹窗关闭按钮: 'https://ctcdn.bestpay.cn/group4/M00/C7/45/rBwwImgiq5uAOgmkAAAF0ixbHaA082.png',
+    会员入会按钮背景图: 'https://ctcdn.bestpay.cn/group4/M00/D1/75/rBwwImiAUXiAfyMJAADCPocs1k0741.png',
+    会员入会按钮光标图: 'https://ctcdn.bestpay.cn/group4/M00/C7/47/rBwwImgisRaAbxBFAAAoPrsdCHM486.png',
+    未开通文案: '每月最高省',
+    生日礼包按钮: 'https://ctcdn.bestpay.cn/group4/M00/D1/79/rBwwImiAdn-AZRa9AAAfETGPLr0736.png',
+    会员字体主颜色: '#FFFFFF',
+    会员权益券金额颜色: '#FFFFFF',
+    会员权益券可领数量颜色: '#FFFFFF',
+    外部券码样式: {
+      会员外部券码弹窗背景图: 'https://cdn.bestpay.cn/market/外部券码领取成功会员2.png',
+      会员外部券码按钮背景颜色: '#0E9AFF'
+    }
+  }
+  
+}
