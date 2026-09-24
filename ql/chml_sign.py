@@ -403,11 +403,24 @@ def main() -> int:
     cost = time.time() - start
     say(f"⏱️ 执行耗时：{int(cost)} 秒")
     task = f"{APP_NAME} 会员签到"
+    # ★ 2026-09-24 修复：原来写成 notify_and_format(task, [字符串…], cost_s=int(cost))
+    #   而 notify_and_format 的签名是 (task, accounts, *, title, start_ts, echo) ——
+    #   既没有 cost_s 参数，accounts 也必须是 dict 列表。原调用必抛 TypeError，
+    #   又被 except Exception: pass 吞掉 → **推送一直静默失效**。
+    fmt: List[Dict[str, Any]] = []
+    for a in accounts:
+        msg = (a.get("msg") or "").strip()
+        if a.get("ok"):
+            fmt.append({"account": a.get("name") or "账号",
+                        "status": msg or "签到成功"})
+        else:
+            fmt.append({"account": a.get("name") or "账号",
+                        "status": "未完成", "error": msg})
+    ok_n = sum(1 for a in accounts if a.get("ok"))
     try:
-        notify_and_format(task, [a["name"] + " " + a["msg"] for a in accounts],
-                          cost_s=int(cost))
+        notify_and_format(task, fmt, title=f"{task} {ok_n}/{len(fmt)}", start_ts=start)
     except Exception:
-        pass
+        print(format_report(task, fmt, push_result="推送模块异常", cost_s=cost))
     return 0
 
 
