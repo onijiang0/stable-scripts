@@ -23,6 +23,11 @@ auth.json
 *.token
 *.cookie
 
+# 设备指纹缓存（按账号持久化，属设备指纹类数据，不入库）
+# wc_sign.py 首次运行时在其所在目录生成
+ql/.wc_device.json
+ql/.wc_device.json.tmp
+
 # 本地配置
 config.local.*
 *.local
