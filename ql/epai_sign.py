@@ -10,7 +10,7 @@
 # ------------------------------------------
 # 变量名：epai
 # 变量值：phone#openid，多账号换行或 & 分隔，可加 #备注
-#   例：13800000000#oTESTxxxxxxxxxxxxxxxxxxx#大号
+#   例：<手机号>#<openid>#<备注>
 #   （phone=账号手机号，openid=取码服务里的 openid；上面仅占位示例）
 #   phone  = 账号明文手机号（登录用）
 #   openid = 取码服务 smallcat 里保存的 openid（/wx/code 用）
