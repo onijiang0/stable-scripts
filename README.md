@@ -59,6 +59,7 @@
 | `naco_sign.py` | NACO旗舰店（有赞微商城）· 每日签到 | `naco` | `45 17 * * *` |
 | `epai_sign.py` | 东风奕派（eπ）· 每日签到 | `epai` | `40 17 * * *` |
 | `kehao_sign.py` | 可好便利店（达达 Dmall）· 每日签到 | `kehao` | `25 17 * * *` |
+| `airui_sign.js` | 艾瑞调研问卷（ikbang）· 每日签到 | `airui` | `57 16 * * *` |
 
 ### ql/ 库文件（不建定时任务）
 
