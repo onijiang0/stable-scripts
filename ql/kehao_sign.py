@@ -16,13 +16,16 @@
 # wx_auth        必填，取码服务鉴权
 # QL_NOTIFY      选填，0 关闭推送
 # KEHAO_DRY_RUN  选填，1 只查状态不签到
+# KEHAO_TASK     选填，0 关闭每日浏览任务（默认开）
 # ------------------------------------------
 # 已实现：
 # 1. 多账号；缺变量报错；单号失败不中断
 # 2. /wx/code 拿 code -> loginInSilenceWithoutPhone 静默登录（免手机号）
 # 3. memberInfoNew 取 userId/openId/积分；checkIn 签到
-# 4. bzKey 自生成（设备指纹混淆串，已逆验精确复现）
-# 5. send_notify 统一简报；openid/token 脱敏
+# 4. **每日浏览任务**：page 取 tasks[] -> acceptTask -> 等 browseSeconds -> finishTask
+#    -> receiveReward（实测 2 个任务，各「浏览15S得5积分」）
+# 5. bzKey 自生成（设备指纹混淆串，已逆验精确复现）
+# 6. send_notify 统一简报；openid/token 脱敏
 #
 # 契约（appid wx74ccada2e896dd46，达达 Dmall 体系，uniquecode=kehao_wx）：
 # 取码   POST {wx_server_url}/wx/code  json:{openid, appid} -> data.code
@@ -36,6 +39,14 @@
 #        -> data.userInfo.{userId, openId, phone} / data.points
 # 签到   GET  https://sign-in.dmall-os.cn/v2/checkIn?param=<json>&d_track_data=<json>
 #        -> code=0000 成功（data.todayRewards/consecutiveDays）；1007=今日已签到
+# 任务页 GET  .../v2/page?param=<json>&d_track_data=<json>
+#        param 需多带 "signMonth":""；data 是布局块数组（layoutType 2/3/4/5），
+#        layoutType=4 的 tasks[] 给 signTaskId / title / browseSeconds / rewardDesc
+# 任务   GET  .../v2/acceptTask    ?param=<json+sigTaskConfigId>&d_track_data=
+#        GET  .../v2/finishTask    ?param=<json+sigTaskConfigId>&d_track_data=
+#        GET  .../v2/receiveReward ?param=<json+sigTaskConfigId>&d_track_data=
+#        sigTaskConfigId = page 里 tasks[].signTaskId（不是 signConfigId/taskId）
+#        -> code=0000 即成功
 # 业务头 ticketname / token / uniquecode:kehao_wx / channel:miniprograms /
 #        platform:43 / applettype:17 / scene:vip / v:v6.5.0 / appversion:6.5.0 /
 #        venderid:37121 / storeid:570081 / graystoreid / grayvenderid /
@@ -89,6 +100,11 @@ LOGIN_URL = "https://passport.dmall-os.cn/wechatApplet/loginInSilenceWithoutPhon
 MEMBER_URL = "https://weixinapp.dmall-os.cn/member/memberInfoNew"
 CHECKIN_URL = "https://sign-in.dmall-os.cn/v2/checkIn"
 POINT_URL = "https://sign-in.dmall-os.cn/v2/queryUserPoint"
+PAGE_URL = "https://sign-in.dmall-os.cn/v2/page"
+TASK_URL_TPL = "https://sign-in.dmall-os.cn/v2/%s"  # acceptTask / finishTask / receiveReward
+
+# 浏览任务开关（默认开；设 KEHAO_TASK=0 关闭）
+TASK_ON = os.getenv("KEHAO_TASK") != "0"
 
 ALREADY_CODES = {"1007"}
 ALREADY_MSG_RE = re.compile(r"已签|已经签|签到过|重复|勿重复", re.I)
@@ -324,6 +340,81 @@ class KehaoTask:
             return int(d)
         return None
 
+    # ---------- 浏览任务 ----------
+
+    def _biz_headers(self, login: Dict[str, str], user: Dict[str, Any]) -> Dict[str, str]:
+        h = self._headers(login, {
+            "businesscode": "1", "openid": user.get("openId") or "",
+            "venderid": str(VENDER_ID), "storeid": STORE_ID, "graystoreid": STORE_ID,
+            "grayvenderid": str(VENDER_ID), "storegroupkey": STORE_GROUP_KEY,
+        })
+        if user.get("userId"):
+            h["userid"] = user["userId"]
+        return h
+
+    def page_tasks(self, login: Dict[str, str], user: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """取签到页任务列表（layoutType=4 块里的 tasks[]）。"""
+        q = urllib.parse.urlencode({
+            "param": self._param(login, {"signMonth": ""}),
+            "d_track_data": self._track(),
+        })
+        r = http("GET", PAGE_URL + "?" + q, self._biz_headers(login, user))
+        j = r.get("json") or {}
+        if str(j.get("code")) != "0000":
+            raise RuntimeError(f"page 失败: code={j.get('code')} msg={j.get('msg')}")
+        tasks: List[Dict[str, Any]] = []
+        for blk in j.get("data") or []:
+            if isinstance(blk, dict) and blk.get("tasks"):
+                tasks.extend([t for t in blk["tasks"] if isinstance(t, dict)])
+        return tasks
+
+    def _task_call(self, ep: str, login: Dict[str, str], user: Dict[str, Any],
+                   task_id: Any) -> bool:
+        q = urllib.parse.urlencode({
+            "param": self._param(login, {"sigTaskConfigId": task_id}),
+            "d_track_data": self._track(),
+        })
+        r = http("GET", (TASK_URL_TPL % ep) + "?" + q, self._biz_headers(login, user))
+        j = r.get("json") or {}
+        return str(j.get("code")) == "0000"
+
+    def do_tasks(self, login: Dict[str, str], user: Dict[str, Any]) -> Dict[str, Any]:
+        """逐个任务：接任务 -> 等 browseSeconds 秒 -> 完成 -> 领奖。"""
+        tasks = self.page_tasks(login, user)
+        done, points, lines = 0, 0, []
+        for t in tasks:
+            tid = t.get("signTaskId")
+            title = t.get("title") or f"任务{tid}"
+            if tid is None:
+                continue
+            rd = t.get("rewardDesc") or {}
+            m = re.search(r"\d+", str(rd.get("value") or ""))
+            task_pts = int(m.group()) if m else 0
+            wait = t.get("browseSeconds")
+            try:
+                wait = int(wait) if wait is not None else 15
+            except Exception:
+                wait = 15
+            if wait < 0 or wait > 120:
+                wait = 15
+            try:
+                # acceptTask 失败 = 今日已做过 / 不可重复，直接跳过（省掉浏览等待）
+                if not self._task_call("acceptTask", login, user, tid):
+                    lines.append(f"{title} 今日已做")
+                    continue
+                time.sleep(wait)  # 浏览时长要求
+                fin_ok = self._task_call("finishTask", login, user, tid)
+                rec_ok = self._task_call("receiveReward", login, user, tid)
+                if fin_ok and rec_ok:
+                    done += 1
+                    points += task_pts
+                    lines.append(f"{title} ✅" + (f"+{task_pts}分" if task_pts else ""))
+                else:
+                    lines.append(f"{title} ⚠️(完成{int(fin_ok)} 领奖{int(rec_ok)})")
+            except Exception as e:
+                lines.append(f"{title} ❌ {e}")
+        return {"total": len(tasks), "done": done, "points": points, "lines": lines}
+
     def run(self) -> Dict[str, Any]:
         acc = {
             "account": self.remark, "phone": "", "status": "❌ 失败",
@@ -340,6 +431,12 @@ class KehaoTask:
             acc["phone"] = user.get("phone") or ""
             acc["extra"].append(f"userId={mask(user.get('userId'))}")
 
+            if DRY_RUN:
+                tasks = self.page_tasks(login, user)
+                acc["status"] = "🧪 DRY-RUN（未签到 / 未做任务）"
+                acc["extra"].append(f"待做任务 {len(tasks)} 个")
+                return acc
+
             state = self.checkin(login, user)
             if state.get("ok"):
                 if state.get("already"):
@@ -350,18 +447,27 @@ class KehaoTask:
                     acc["reward"] = state.get("reward") or ""
                     if state.get("days"):
                         acc["extra"].append(f"连签 {state.get('days')} 天")
-
-            if DRY_RUN:
-                acc["status"] = "🧪 DRY-RUN（未提交）"
-                return acc
-
-            if not state.get("ok"):
+            else:
                 acc["status"] = "⚠️ 未完成"
-                acc["extra"].append(f"code={state.get('code')} msg={state.get('msg')}")
+                acc["extra"].append(f"签到 code={state.get('code')} msg={state.get('msg')}")
 
-            pts = user.get("points")
+            # 每日浏览任务
+            if TASK_ON:
+                try:
+                    tk = self.do_tasks(login, user)
+                    pts_s = f" +{tk['points']}分" if tk.get("points") else ""
+                    acc["extra"].append(f"浏览任务 {tk['done']}/{tk['total']} 完成{pts_s}")
+                    for ln in tk["lines"]:
+                        acc["extra"].append(f"  {ln}")
+                    if tk["done"] and not acc["reward"]:
+                        acc["reward"] = f"任务{tk['points']}分" if tk.get("points") else "任务完成"
+                except Exception as e:
+                    acc["extra"].append(f"浏览任务异常: {e}")
+
+            # 任务后再查一次积分，反映最新值
+            pts = self.query_points(login, user)
             if pts is None:
-                pts = self.query_points(login, user)
+                pts = user.get("points")
             if pts is not None:
                 acc["extra"].append(f"当前积分 {pts}")
         except Exception as e:
